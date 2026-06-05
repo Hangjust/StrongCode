@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.strongcode/
+coverage/
+.sisyphus/
+*.log
+.env
+.env.*
+!.env.example
+
+# Local/open-source non-shippables
+Harness Ideas.md
+harness ideas.md
+strongcode.config.yaml
+CompletionSound.m4a
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

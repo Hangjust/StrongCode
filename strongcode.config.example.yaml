@@ -1,0 +1,56 @@
+version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: default
+providers:
+  openai:
+    type: openai
+    displayName: GPT / OpenAI
+    apiKeyEnv: OPENAI_API_KEY
+    baseUrl: https://api.openai.com/v1
+    modelsEndpoint: /models
+    enabled: false
+  kimi:
+    type: openai-compatible
+    displayName: Kimi
+    apiKeyEnv: MOONSHOT_API_KEY
+    baseUrl: https://api.moonshot.ai/v1
+    modelsEndpoint: /models
+    enabled: false
+  anthropic:
+    type: anthropic
+    displayName: Claude
+    apiKeyEnv: ANTHROPIC_API_KEY
+    enabled: false
+  grok:
+    type: openai-compatible
+    displayName: Grok
+    apiKeyEnv: XAI_API_KEY
+    baseUrl: https://api.x.ai/v1
+    modelsEndpoint: /models
+    enabled: false
+  mock:
+    type: mock
+    displayName: Mock
+    enabled: true
+  custom:
+    type: openai-compatible
+    displayName: Custom Provider
+    apiKeyEnv: CUSTOM_PROVIDER_API_KEY
+    modelsEndpoint: /models
+    enabled: false
+agents:
+  default:
+    model: mock
+    tools:
+      - list_files
+      - read_file
+models:
+  mock:
+    provider: mock
+    model: mock
+    enabled: true
+permissions:
+  tools:
+    list_files: allow
+    read_file: allow

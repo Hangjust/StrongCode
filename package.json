@@ -1,0 +1,32 @@
+{
+  "name": "strongcode",
+  "version": "0.1.0",
+  "description": "A minimal local agent harness scaffold for Node 20.",
+  "license": "MIT",
+  "bin": {
+    "strongcode": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.3.1",
+    "@opentui/keymap": "^0.3.1",
+    "@opentui/solid": "^0.3.1",
+    "commander": "^12.1.0",
+    "solid-js": "^1.9.12",
+    "yaml": "^2.8.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0",
+    "vitest": "^4.1.8"
+  }
+}

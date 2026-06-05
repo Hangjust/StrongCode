@@ -1,5 +1,9 @@
 # StrongCode
 
+
+
+# NOTE THIS IS STILL A WORK IN PROGRESS!
+
 ![Code Smarter](Code%20Smarter.gif)
 
 StrongCode is a small TypeScript/Node 20 scaffold for a local agent harness with a terminal-first operations console TUI. It is intentionally minimal: local configuration, JSONL sessions, provider/model management, a mock model provider, OpenAI-compatible chat completions, read-only tools, deny-by-default permissions, a CLI, and a TUI.

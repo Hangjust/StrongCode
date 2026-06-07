@@ -4,6 +4,7 @@ import { AgentRunner } from "../src/agents/runner";
 import { Agent } from "../src/agents/agent";
 import { MockModelProvider } from "../src/models/mock-provider";
 import { OpenAICompatibleFetcher } from "../src/models/openai-compatible-provider";
+import { ProviderAuthStore } from "../src/models/auth-store";
 import { createAgent } from "../src/runtime/factory";
 import { SessionStore } from "../src/sessions/session-store";
 import { createDefaultToolRegistry } from "../src/tools/registry";
@@ -16,6 +17,49 @@ function parseJsonObject(text: string): Record<string, unknown> {
   }
 
   return parsed as Record<string, unknown>;
+}
+
+function jwtWithClaims(claims: Record<string, unknown>): string {
+  return [
+    Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url"),
+    Buffer.from(JSON.stringify(claims)).toString("base64url"),
+    "signature"
+  ].join(".");
+}
+
+function openAIChatGptConfig(workspace: Awaited<ReturnType<typeof tempWorkspace>>) {
+  return {
+    ...workspace.config,
+    providers: {
+      ...workspace.config.providers,
+      openai: {
+        type: "openai",
+        displayName: "GPT / OpenAI",
+        apiKeyEnv: "STRONGCODE_TEST_OPENAI_API_KEY",
+        baseUrl: "https://api.openai.com/v1",
+        modelsEndpoint: "/models",
+        enabled: true
+      }
+    },
+    agents: {
+      ...workspace.config.agents,
+      default: {
+        ...workspace.config.agents.default,
+        model: "gpt-test"
+      }
+    },
+    models: {
+      ...workspace.config.models,
+      "gpt-test": {
+        provider: "openai",
+        model: "gpt-test",
+        displayName: "GPT Test",
+        enabled: true,
+        source: "configured",
+        options: undefined
+      }
+    }
+  };
 }
 
 function openAICompatibleConfig(workspace: Awaited<ReturnType<typeof tempWorkspace>>) {
@@ -237,6 +281,92 @@ describe("runner", () => {
       } else {
         process.env.STRONGCODE_TEST_API_KEY = originalApiKey;
       }
+    }
+  });
+
+  it("routes OpenAI ChatGPT OAuth completions to Codex with account header", async () => {
+    const workspace = await tempWorkspace();
+    const originalApiKey = process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+    delete process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+    const authStore = new ProviderAuthStore(workspace.context.dataDir);
+    await authStore.set("openai", { type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000, accountId: "account-123" });
+    const calls: Array<{ url: string; init: Parameters<OpenAICompatibleFetcher>[1] }> = [];
+
+    try {
+      const fetcher: OpenAICompatibleFetcher = async (url, init) => {
+        calls.push({ url, init });
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({ choices: [{ message: { content: "oauth response" } }] });
+          }
+        };
+      };
+      const agent = createAgent(openAIChatGptConfig(workspace), "default", { modelFetch: fetcher, authStore });
+      const runner = new AgentRunner(workspace.context, new SessionStore(workspace.context.dataDir), createDefaultToolRegistry());
+
+      const result = await runner.run(agent, "hello", "openai-oauth");
+
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.value.response).toBe("oauth response");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://chatgpt.com/backend-api/codex/responses");
+      expect(calls[0].init.headers).toEqual({
+        "Content-Type": "application/json",
+        Authorization: "Bearer oauth-access",
+        "ChatGPT-Account-Id": "account-123"
+      });
+    } finally {
+      if (originalApiKey === undefined) delete process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+      else process.env.STRONGCODE_TEST_OPENAI_API_KEY = originalApiKey;
+    }
+  });
+
+  it("refreshes expired OpenAI ChatGPT OAuth auth and persists account id", async () => {
+    const workspace = await tempWorkspace();
+    const originalApiKey = process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+    const originalFetch = globalThis.fetch;
+    delete process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+    const authStore = new ProviderAuthStore(workspace.context.dataDir);
+    await authStore.set("openai", { type: "oauth", access: "expired-access", refresh: "refresh-token", expires: Date.now() - 1000 });
+    const calls: Array<{ url: string; init: Parameters<OpenAICompatibleFetcher>[1] }> = [];
+
+    try {
+      globalThis.fetch = async () => new Response(JSON.stringify({
+        access_token: "fresh-access",
+        refresh_token: "fresh-refresh",
+        expires_in: 3600,
+        id_token: jwtWithClaims({ chatgpt_account_id: "fresh-account" })
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+      const fetcher: OpenAICompatibleFetcher = async (url, init) => {
+        calls.push({ url, init });
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({ choices: [{ message: { content: "refreshed" } }] });
+          }
+        };
+      };
+      const agent = createAgent(openAIChatGptConfig(workspace), "default", { modelFetch: fetcher, authStore });
+      const runner = new AgentRunner(workspace.context, new SessionStore(workspace.context.dataDir), createDefaultToolRegistry());
+
+      const result = await runner.run(agent, "hello", "openai-refresh");
+
+      expect(result.ok).toBe(true);
+      expect(calls[0].init.headers.Authorization).toBe("Bearer fresh-access");
+      expect(calls[0].init.headers["ChatGPT-Account-Id"]).toBe("fresh-account");
+      await expect(authStore.get("openai")).resolves.toMatchObject({
+        type: "oauth",
+        access: "fresh-access",
+        refresh: "fresh-refresh",
+        accountId: "fresh-account"
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalApiKey === undefined) delete process.env.STRONGCODE_TEST_OPENAI_API_KEY;
+      else process.env.STRONGCODE_TEST_OPENAI_API_KEY = originalApiKey;
     }
   });
 

@@ -2,6 +2,7 @@ import { ModelConfig, ProviderConfig } from "../config/schema";
 import { ModelProvider } from "./provider";
 import { MockModelProvider, UnsupportedModelProvider } from "./mock-provider";
 import { OpenAICompatibleFetcher, OpenAICompatibleModelProvider } from "./openai-compatible-provider";
+import type { ProviderAuthReader } from "./auth-store";
 
 export interface CreateModelProviderOptions {
   providerId: string;
@@ -9,6 +10,7 @@ export interface CreateModelProviderOptions {
   modelId: string;
   modelConfig: ModelConfig;
   fetcher?: OpenAICompatibleFetcher;
+  authStore?: ProviderAuthReader;
 }
 
 export function createModelProvider(options: CreateModelProviderOptions): ModelProvider {

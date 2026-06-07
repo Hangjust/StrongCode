@@ -8,7 +8,7 @@
 
 StrongCode is a small TypeScript/Node 20 scaffold for a local agent harness with a terminal-first operations console TUI. It is intentionally minimal: local configuration, JSONL sessions, provider/model management, a mock model provider, OpenAI-compatible chat completions, read-only tools, deny-by-default permissions, a CLI, and a TUI.
 
-It does not include shell execution, write/edit tools, MCP, plugins, streaming, hidden agents, or stored credentials.
+It does not include shell execution, write/edit tools, MCP, plugins, streaming, or hidden agents.
 
 ## Install
 
@@ -117,9 +117,14 @@ Permissions are `allow`, `ask`, or `deny`. Unknown tools are denied. `ask` is de
 
 ## Providers
 
-Use `/provider` inside the TUI to inspect and configure providers. The built-in order is GPT / OpenAI, Kimi, Claude, Grok, Mock, then Custom Provider.
+Use `/connect` inside the TUI to connect provider credentials. Use `/provider` to inspect provider status and `/provider ...` for provider subcommands. The built-in order is GPT / OpenAI, Kimi, Claude, Grok, Mock, then Custom Provider.
 
 ```text
+/connect
+/connect <provider-id> <api-key>
+/connect openai chatgpt-browser
+/connect openai chatgpt-headless
+/connect remove <provider-id>
 /provider
 /provider list
 /provider select openai
@@ -131,9 +136,11 @@ Use `/provider` inside the TUI to inspect and configure providers. The built-in 
 /model <model-id>
 ```
 
-Provider config stores env var names such as `OPENAI_API_KEY`, not API keys. OpenAI-compatible discovery uses a `GET <baseUrl>/models` response and adds discovered models disabled by default so you can enable the ones you want.
+Provider config stores env var names such as `OPENAI_API_KEY`, not API keys. `/connect <provider-id> <api-key>` stores API credentials in `.strongcode/auth.json` with restrictive file permissions where the platform supports them. `/connect openai chatgpt-browser` starts ChatGPT account OAuth in a browser, and `/connect openai chatgpt-headless` starts the device-code flow. OpenAI-compatible discovery uses a `GET <baseUrl>/models` response and adds discovered models disabled by default so you can enable the ones you want.
 
-Do not put `apiKey`, `token`, `secret`, `authorization`, or `bearerToken` fields in config. The loader rejects those fields at provider and model config levels. Providers of type `openai` or `openai-compatible` use `apiKeyEnv` at completion time and send non-streaming chat completions to `<baseUrl>/chat/completions`.
+Do not put `apiKey`, `token`, `accessToken`, `refreshToken`, `idToken`, `clientSecret`, `secret`, `authorization`, or `bearerToken` fields in config. The loader rejects those fields at provider and model config levels. Providers of type `openai` or `openai-compatible` use `apiKeyEnv` or `.strongcode/auth.json` credentials at discovery/completion time. API-key completions send non-streaming chat completions to `<baseUrl>/chat/completions`; OpenAI ChatGPT account OAuth completions use the ChatGPT Codex endpoint.
+
+Fully supported runtime providers are `mock`, `openai`, and `openai-compatible`. Catalog-visible providers such as `anthropic` are listed for connection/status but remain unsupported for completions until a backend client is added.
 
 ## Sessions
 

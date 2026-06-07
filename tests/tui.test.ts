@@ -1,7 +1,7 @@
 import { renderHome, renderSessionLayout, renderStatus, renderHints } from "../src/tui/render";
-import { exactHomeCommandOverlay, runTui, shouldSubmitHomePrompt } from "../src/tui/app";
+import { activeCustomProviderModelRows, apiKeyEnvForProviderId, connectCommandForProviderAuthMethod, draftHomeCommandOverlay, exactHomeCommandOverlay, isProviderPopupOverlay, isValidCustomProviderId, navigationKeyName, nextSelectionIndex, promptDraftAfterEscape, providerAuthOverlayForMethods, providerDialogTitle, providerPickerDescription, providerPickerPriority, runTui, scrollTopForSelectedRow, selectedSlashCommand, selectedTextForClipboard, shouldAutoDiscoverCustomProviderModels, shouldCopySelectionForInput, shouldCopySelectionForMouse, shouldSubmitHomePrompt, shouldSubmitHomeValue } from "../src/tui/app";
 import { PassThrough } from "node:stream";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { defaultTuiConfig } from "../src/tui/config/tui";
@@ -12,7 +12,7 @@ import { createKeySequenceState, dispatchKeySequence, renderWhichKey } from "../
 import { createBuiltinPluginRuntime } from "../src/tui/plugin";
 import { renderPaletteOverlay, renderSlashCommandOverlay } from "../src/tui/ui/overlay";
 import { screenForRoute, TuiRouter } from "../src/tui/route";
-import { renderApprovalSurface, renderDiffSurface, renderEditorPasteSurface, renderPickerSurface, renderProviderDialogSurface } from "../src/tui/ui/surfaces";
+import { renderApprovalSurface, renderDiffSurface, renderEditorPasteSurface, renderPickerSurface } from "../src/tui/ui/surfaces";
 import { renderFilteredPalette } from "../src/tui/ui/palette";
 
 function visibleLength(text: string): number {
@@ -52,6 +52,16 @@ async function runScriptedTui(lines: string[]): Promise<string> {
   input.end();
   await finished;
   return outputData;
+}
+
+async function runScriptedTuiInDirectory(directory: string, lines: string[]): Promise<string> {
+  const originalCwd = process.cwd();
+  process.chdir(directory);
+  try {
+    return await runScriptedTui(lines);
+  } finally {
+    process.chdir(originalCwd);
+  }
 }
 
 describe("tui", () => {
@@ -239,6 +249,48 @@ describe("tui", () => {
     expectBounded(output);
   });
 
+  it("normalizes arrow keys and wraps slash selection", () => {
+    expect(navigationKeyName("up")).toBe("up");
+    expect(navigationKeyName("ArrowUp")).toBe("up");
+    expect(navigationKeyName("arrow_up")).toBe("up");
+    expect(navigationKeyName("upArrow")).toBe("up");
+    expect(navigationKeyName("down")).toBe("down");
+    expect(navigationKeyName("ArrowDown")).toBe("down");
+    expect(navigationKeyName("arrow_down")).toBe("down");
+    expect(navigationKeyName("downArrow")).toBe("down");
+    expect(navigationKeyName("Enter")).toBe("return");
+    expect(navigationKeyName("esc")).toBe("escape");
+    expect(navigationKeyName("tab")).toBeUndefined();
+    expect(nextSelectionIndex(0, 3, -1)).toBe(2);
+    expect(nextSelectionIndex(2, 3, 1)).toBe(0);
+    expect(nextSelectionIndex(1, 3, 1)).toBe(2);
+    expect(nextSelectionIndex(5, 0, -1)).toBe(0);
+  });
+
+  it("keeps selected dialog row inside the scroll viewport", () => {
+    expect(scrollTopForSelectedRow(0, 12)).toBe(0);
+    expect(scrollTopForSelectedRow(11, 12)).toBe(0);
+    expect(scrollTopForSelectedRow(12, 12)).toBe(1);
+    expect(scrollTopForSelectedRow(20, 12)).toBe(9);
+    expect(scrollTopForSelectedRow(3, 0)).toBe(3);
+  });
+
+  it("copies only non-empty selected TUI text for Ctrl+C and right-click", () => {
+    const selectedText = selectedTextForClipboard({ getSelectedText: () => "copy me" });
+    const emptyText = selectedTextForClipboard({ getSelectedText: () => "" });
+
+    expect(selectedText).toBe("copy me");
+    expect(emptyText).toBeUndefined();
+    expect(selectedTextForClipboard(null)).toBeUndefined();
+    expect(shouldCopySelectionForInput("ctrl+c", selectedText)).toBe(true);
+    expect(shouldCopySelectionForInput("ctrl+c", emptyText)).toBe(false);
+    expect(shouldCopySelectionForInput("ctrl+x", selectedText)).toBe(false);
+    expect(shouldCopySelectionForMouse({ type: "down", button: 2 }, 2, selectedText)).toBe(true);
+    expect(shouldCopySelectionForMouse({ type: "up", button: 2 }, 2, selectedText)).toBe(false);
+    expect(shouldCopySelectionForMouse({ type: "down", button: 0 }, 2, selectedText)).toBe(false);
+    expect(shouldCopySelectionForMouse({ type: "down", button: 2 }, 2, emptyText)).toBe(false);
+  });
+
   it("describes extended routes and bounded StrongCode-style surfaces", () => {
     const router = new TuiRouter();
     const route = router.go("diff");
@@ -254,56 +306,6 @@ describe("tui", () => {
     expect(output).toContain("Tool Approval");
     expect(output).toContain("> One First");
     expect(output).toContain("Editor Paste");
-    expectBounded(output);
-  });
-
-  it("renders OpenCode-style provider dialog surface", () => {
-    const output = renderProviderDialogSurface([
-      {
-        id: "openai",
-        title: "GPT / OpenAI",
-        description: "(ChatGPT Plus/Pro or API key)",
-        category: "Popular",
-        connected: false,
-        credential: "env OPENAI_API_KEY (missing)",
-        footer: "https://api.openai.com/v1"
-      },
-      {
-        id: "mock",
-        title: "Mock",
-        description: "(local mock provider)",
-        category: "Popular",
-        connected: true,
-        credential: "no key required"
-      },
-      {
-        id: "custom",
-        title: "Other",
-        description: "Custom provider",
-        category: "Providers",
-        connected: false,
-        credential: "env CUSTOM_PROVIDER_API_KEY (missing)"
-      }
-    ], 1);
-
-    expect(output).toContain("Connect a provider");
-    expect(output).toContain("esc");
-    expect(output).toContain("Search");
-    expect(output).toContain("Popular");
-    expect(output).toContain("> ✓ Mock (local mock provider)");
-    expect(output).toContain("Providers");
-    expect(output).toContain("Other Custom provider");
-    expect(renderProviderDialogSurface([
-      {
-        id: "openai",
-        title: "GPT / OpenAI",
-        description: "(ChatGPT Plus/Pro or API key)",
-        category: "Popular",
-        connected: false,
-        credential: "env OPENAI_API_KEY (missing)"
-      }
-    ], 0, "open")).toContain("Search open");
-    expect(output).not.toContain("sk-");
     expectBounded(output);
   });
 
@@ -363,7 +365,7 @@ describe("tui", () => {
     const outputData = await runScriptedTui(["/provider", "/exit"]);
 
     expect(outputData).toContain("Current provider");
-    expect(outputData).toContain("Setup");
+    expect(outputData).toContain("Connect /connect");
     expect(outputData).toContain("/provider configure custom");
     expectBounded(outputData);
   });
@@ -376,15 +378,73 @@ describe("tui", () => {
     expectBounded(outputData);
   });
 
+  it("refreshes provider status after connect in the same scripted TUI session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "strongcode-tui-connect-"));
+    await writeFile(path.join(root, "strongcode.config.yaml"), `version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: default
+providers:
+  mock:
+    type: mock
+    displayName: Mock
+    enabled: true
+  custom:
+    type: openai-compatible
+    displayName: Custom Provider
+    apiKeyEnv: CUSTOM_PROVIDER_API_KEY
+    baseUrl: https://example.com/v1
+    modelsEndpoint: /models
+    enabled: false
+agents:
+  default:
+    model: mock
+    tools: []
+models:
+  mock:
+    provider: mock
+    model: mock
+    enabled: true
+permissions:
+  tools: {}
+`, "utf8");
+
+    const outputData = await runScriptedTuiInDirectory(root, ["/connect custom same-session-key", "/provider list", "/exit"]);
+
+    expect(outputData).toContain("Connected custom; credentials saved in auth.json");
+    expect(outputData).toContain("Custom Provider · enabled");
+    expect(outputData).toContain("auth.json (set)");
+    expect(outputData).not.toContain("same-session-key");
+    expectBounded(outputData);
+  });
+
   it("runs provider status from slash suggestion selection", async () => {
     const palette = createDefaultPalette();
 
-    expect(palette.find("/provider")?.description).toContain("subcommands");
+    expect(palette.find("/provider")?.description).toContain("connect");
+    expect(palette.find("/connect")?.title).toBe("Connect");
     expect(palette.find("/providers")?.title).toBe("Providers");
   });
 
+  it("resolves partial slash input through the selected suggestion", () => {
+    const palette = createDefaultPalette();
+    const connectSuggestions = palette.search("con").sort((left, right) => left.slash.localeCompare(right.slash));
+    const providerSuggestions = [
+      { id: "provider", title: "Provider", description: "Inspect providers", slash: "/provider" },
+      { id: "providers", title: "Providers", description: "Open provider picker", slash: "/providers" }
+    ];
+
+    expect(selectedSlashCommand(connectSuggestions, 0)?.slash).toBe("/connect");
+    expect(selectedSlashCommand(providerSuggestions, 0)?.slash).toBe("/provider");
+    expect(selectedSlashCommand(providerSuggestions, 1)?.slash).toBe("/providers");
+    expect(selectedSlashCommand(providerSuggestions, 99)?.slash).toBe("/providers");
+    expect(selectedSlashCommand(providerSuggestions, -1)?.slash).toBe("/provider");
+    expect(selectedSlashCommand([], 0)).toBeUndefined();
+  });
+
   it("routes exact home provider and model commands to picker overlays", () => {
-    expect(exactHomeCommandOverlay("/provider")).toBe("providers");
+    expect(exactHomeCommandOverlay("/provider")).toBeUndefined();
+    expect(exactHomeCommandOverlay("/connect")).toBe("providers");
     expect(exactHomeCommandOverlay("/providers")).toBe("providers");
     expect(exactHomeCommandOverlay("/model")).toBe("models");
     expect(exactHomeCommandOverlay("/models")).toBeUndefined();
@@ -392,8 +452,76 @@ describe("tui", () => {
     expect(exactHomeCommandOverlay("hello")).toBeUndefined();
     expect(shouldSubmitHomePrompt("none")).toBe(true);
     expect(shouldSubmitHomePrompt("providers")).toBe(false);
+    expect(shouldSubmitHomePrompt("providerAuthMethod")).toBe(false);
     expect(shouldSubmitHomePrompt("models")).toBe(false);
     expect(shouldSubmitHomePrompt("slashCommands")).toBe(false);
+    expect(shouldSubmitHomeValue("slashCommands", "/connect")).toBe(true);
+    expect(shouldSubmitHomeValue("slashCommands", "/providers")).toBe(true);
+    expect(shouldSubmitHomeValue("slashCommands", "/model")).toBe(true);
+    expect(shouldSubmitHomeValue("slashCommands", "/con")).toBe(false);
+    expect(shouldSubmitHomeValue("slashCommands", "/connect custom")).toBe(false);
+    expect(shouldSubmitHomeValue("providers", "/connect")).toBe(false);
+    expect(shouldSubmitHomeValue("providers", "hello")).toBe(false);
+  });
+
+  it("does not open provider popup while typing exact connect", () => {
+    expect(draftHomeCommandOverlay("/connect")).toBeUndefined();
+    expect(draftHomeCommandOverlay("/con")).toBeUndefined();
+    expect(draftHomeCommandOverlay("/connect custom")).toBeUndefined();
+    expect(draftHomeCommandOverlay("/provider")).toBeUndefined();
+  });
+
+  it("clears secret provider auth input on escape", () => {
+    expect(promptDraftAfterEscape("providerAuth", "sk-secret")).toBe("");
+    expect(promptDraftAfterEscape("providerAuthMethod", "sk-secret")).toBe("");
+    expect(promptDraftAfterEscape("slashCommands", "/con")).toBe("");
+    expect(promptDraftAfterEscape("providers", "open")).toBe("open");
+  });
+
+  it("routes provider auth methods like the OpenCode connect popup", () => {
+    const openAiMethods = [{ type: "oauth" as const, label: "ChatGPT Plus/Pro" }, { type: "api" as const, label: "Manually enter API Key" }];
+    const apiOnlyMethods = [{ type: "api" as const, label: "API key" }];
+
+    expect(providerAuthOverlayForMethods(openAiMethods)).toBe("providerAuthMethod");
+    expect(providerAuthOverlayForMethods(apiOnlyMethods)).toBe("providerAuth");
+    expect(connectCommandForProviderAuthMethod("openai", openAiMethods[0])).toBe("/connect openai chatgpt-browser");
+    expect(connectCommandForProviderAuthMethod("openai", openAiMethods[1])).toBeUndefined();
+  });
+
+  it("treats provider flows as popup overlays", () => {
+    expect(isProviderPopupOverlay("providers")).toBe(true);
+    expect(isProviderPopupOverlay("providerAuthMethod")).toBe(true);
+    expect(isProviderPopupOverlay("providerAuth")).toBe(true);
+    expect(isProviderPopupOverlay("models")).toBe(true);
+    expect(isProviderPopupOverlay("slashCommands")).toBe(false);
+    expect(isProviderPopupOverlay("none")).toBe(false);
+  });
+
+  it("keeps custom provider form visible in the connect provider picker", () => {
+    expect(providerDialogTitle("custom", "Custom Provider")).toBe("Custom Provider");
+    expect(providerPickerDescription("custom")).toBe("(OpenAI-compatible custom provider)");
+    expect(providerPickerPriority("custom")).toBeGreaterThan(providerPickerPriority("openai"));
+    expect(providerPickerPriority("custom")).toBeLessThan(providerPickerPriority("kimi"));
+  });
+
+  it("validates custom provider form IDs and derives API-key env names", () => {
+    expect(isValidCustomProviderId("myprovider")).toBe(true);
+    expect(isValidCustomProviderId("my-provider_2")).toBe(true);
+    expect(isValidCustomProviderId("MyProvider")).toBe(false);
+    expect(isValidCustomProviderId("my.provider")).toBe(false);
+    expect(apiKeyEnvForProviderId("my-provider_2")).toBe("MY_PROVIDER_2_API_KEY");
+  });
+
+  it("renders discovered custom provider models as active", () => {
+    expect(activeCustomProviderModelRows(["model-a", "model-b"])).toEqual(["● model-a", "● model-b"]);
+    expect(activeCustomProviderModelRows(["model\u001b[31m-red"])[0]).toBe("● model-red");
+  });
+
+  it("auto-discovers custom provider models only when URL and key are present", () => {
+    expect(shouldAutoDiscoverCustomProviderModels("https://api.example.com/v1", "secret-key")).toBe(true);
+    expect(shouldAutoDiscoverCustomProviderModels("", "secret-key")).toBe(false);
+    expect(shouldAutoDiscoverCustomProviderModels("https://api.example.com/v1", "")).toBe(false);
+    expect(shouldAutoDiscoverCustomProviderModels("   ", "secret-key")).toBe(false);
   });
 
   it("submits prompt text when input sends a line", async () => {

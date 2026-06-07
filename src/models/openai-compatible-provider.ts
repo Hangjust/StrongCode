@@ -2,8 +2,10 @@ import { ProviderConfig, ModelConfig } from "../config/schema";
 import { StrongCodeError } from "../core/errors";
 import { Message, Role, ToolCall } from "../core/types";
 import { resolveProviderCredentials } from "./credentials";
+import type { ProviderAuthReader } from "./auth-store";
 import { buildProviderUrl } from "./provider-url";
 import { ModelProvider, ModelRequest, ModelResponse } from "./provider";
+import { CHATGPT_CODEX_ENDPOINT } from "./chatgpt-oauth";
 
 type ChatRole = "system" | "user" | "assistant";
 
@@ -53,6 +55,7 @@ export interface OpenAICompatibleProviderOptions {
   modelId: string;
   modelConfig: ModelConfig;
   fetcher?: OpenAICompatibleFetcher;
+  authStore?: ProviderAuthReader;
 }
 
 function buildChatCompletionsUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">): string {
@@ -64,6 +67,11 @@ function buildChatCompletionsUrl(providerId: string, providerConfig: Pick<Provid
     }
     throw error;
   }
+}
+
+function completionUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">, credentialType: "api" | "oauth"): string {
+  if (providerId === "openai" && credentialType === "oauth") return CHATGPT_CODEX_ENDPOINT;
+  return buildChatCompletionsUrl(providerId, providerConfig);
 }
 
 function globalOpenAICompatibleFetchTransport(): OpenAICompatibleFetcher {
@@ -224,8 +232,8 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
-    const url = buildChatCompletionsUrl(this.options.providerId, this.options.providerConfig);
-    const credentials = resolveProviderCredentials(this.options.providerId, this.options.providerConfig);
+    const credentials = await resolveProviderCredentials(this.options.providerId, this.options.providerConfig, { authStore: this.options.authStore });
+    const url = completionUrl(this.options.providerId, this.options.providerConfig, credentials.type);
     const body = JSON.stringify({
       model: this.options.modelConfig.model ?? this.options.modelId,
       messages: toChatMessages(request.messages, request.prompt)
@@ -237,7 +245,8 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${credentials.apiKey}`
+          Authorization: `Bearer ${credentials.type === "oauth" ? credentials.access : credentials.apiKey}`,
+          ...(credentials.type === "oauth" && credentials.accountId ? { "ChatGPT-Account-Id": credentials.accountId } : {})
         },
         body
       });
@@ -246,13 +255,13 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
         throw error;
       }
 
-      const message = error instanceof Error ? redactSensitive(error.message, credentials.apiKey) : "request failed";
+      const message = error instanceof Error ? redactSensitive(error.message, credentials.secret) : "request failed";
       throw new StrongCodeError("MODEL_ERROR", `Provider ${this.options.providerId} completion request failed: ${message}`);
     }
 
     const responseText = await response.text();
     if (!response.ok) {
-      const detail = formatProviderError(response, responseText, credentials.apiKey);
+      const detail = formatProviderError(response, responseText, credentials.secret);
       throw new StrongCodeError("MODEL_ERROR", `Provider ${this.options.providerId} completion failed with HTTP ${response.status}: ${detail}`);
     }
 

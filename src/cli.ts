@@ -9,6 +9,7 @@ import { StrongCodeError } from "./core/errors";
 import { AgentRunner } from "./agents/runner";
 import { SessionStore } from "./sessions/session-store";
 import { createDefaultToolRegistry } from "./tools/registry";
+import { ProviderAuthStore } from "./models/auth-store";
 import { requireRuntime, createAgent } from "./runtime/factory";
 import { runTui } from "./tui/app";
 
@@ -139,7 +140,7 @@ export function createProgram(): Command {
     .action(async (prompt: string, options: RunOptions) => {
       const runtime = await requireRuntime(options.config);
       const agentName = options.agent ?? runtime.config.defaultAgent;
-      const agent = createAgent(runtime.config, agentName);
+      const agent = createAgent(runtime.config, agentName, { authStore: new ProviderAuthStore(runtime.context.dataDir) });
       const runner = new AgentRunner(runtime.context, new SessionStore(runtime.context.dataDir), createDefaultToolRegistry());
       const result = await runner.run(agent, prompt, options.session ?? `session-${Date.now()}`);
       if (!result.ok) {

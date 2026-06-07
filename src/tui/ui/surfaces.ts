@@ -58,44 +58,6 @@ export function renderPickerSurface(title: string, items: PickerItem[], selected
   return lines(title, items.map((item, index) => `${index === selectedIndex ? ">" : " "} ${item.label} ${item.description ?? item.id}`));
 }
 
-export interface ProviderDialogItem {
-  id: string;
-  title: string;
-  description: string;
-  category: "Popular" | "Providers";
-  connected: boolean;
-  credential: string;
-  footer?: string;
-}
-
-export function renderProviderDialogSurface(items: ProviderDialogItem[], selectedIndex: number, query = ""): string {
-  const safeQuery = sanitizeDisplayValue(query, "");
-  const body: string[] = [
-    "esc                                                       ",
-    safeQuery ? `Search ${safeQuery}` : "Search",
-    ""
-  ];
-  let category = "";
-  for (const [index, item] of items.entries()) {
-    if (item.category !== category) {
-      category = item.category;
-      body.push(category);
-    }
-    const active = index === selectedIndex;
-    const cursor = active ? ">" : " ";
-    const check = item.connected ? "✓" : " ";
-    body.push(`${cursor} ${check} ${item.title} ${item.description}`);
-    body.push(`    ${item.id} · ${item.credential}`);
-    if (item.footer) body.push(`    ${item.footer}`);
-  }
-
-  if (items.length === 0) {
-    body.push("No results found");
-  }
-
-  return lines("Connect a provider", body);
-}
-
 export interface EditorPasteSurfaceInput {
   content: string;
   maxPreviewChars?: number;

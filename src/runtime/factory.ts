@@ -4,10 +4,12 @@ import { StrongCodeError } from "../core/errors";
 import { Agent } from "../agents/agent";
 import { createModelProvider } from "../models/factory";
 import { OpenAICompatibleFetcher } from "../models/openai-compatible-provider";
+import type { ProviderAuthReader } from "../models/auth-store";
 import { createRuntimeContext, RuntimeContext } from "./context";
 
 export interface CreateAgentOptions {
   modelFetch?: OpenAICompatibleFetcher;
+  authStore?: ProviderAuthReader;
 }
 
 export async function requireRuntime(configPath?: string): Promise<{ config: StrongCodeConfig; context: RuntimeContext }> {
@@ -51,7 +53,8 @@ export function createAgent(config: StrongCodeConfig, agentName: string, options
     providerConfig,
     modelId: agentConfig.model,
     modelConfig,
-    fetcher: options.modelFetch
+    fetcher: options.modelFetch,
+    authStore: options.authStore
   });
 
   return { name: agentName, config: agentConfig, model: provider };

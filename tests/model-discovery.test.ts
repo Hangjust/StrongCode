@@ -1,4 +1,8 @@
 import { discoverOpenAICompatibleModels, DiscoveryFetcher } from "../src/models/discovery";
+import { ProviderAuthStore } from "../src/models/auth-store";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 describe("model discovery", () => {
   it("discovers OpenAI-compatible model ids with an injected fetcher", async () => {
@@ -59,6 +63,35 @@ describe("model discovery", () => {
         process.env.CUSTOM_PROVIDER_API_KEY = originalApiKey;
       }
     }
+  });
+
+  it("uses OpenAI ChatGPT OAuth access for model discovery without using Codex endpoint", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "strongcode-discovery-oauth-"));
+    const authStore = new ProviderAuthStore(root);
+    await authStore.set("openai", { type: "oauth", access: "oauth-access", refresh: "oauth-refresh", expires: Date.now() + 60_000, accountId: "account-123" });
+    const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+
+    const result = await discoverOpenAICompatibleModels({
+      type: "openai",
+      displayName: "GPT / OpenAI",
+      apiKeyEnv: "OPENAI_API_KEY",
+      baseUrl: "https://api.openai.com/v1",
+      modelsEndpoint: "/models",
+      id: "openai",
+      authStore
+    }, async (url, init) => {
+      calls.push({ url, headers: init.headers });
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { data: [{ id: "gpt-test" }] };
+        }
+      };
+    });
+
+    expect(calls).toEqual([{ url: "https://api.openai.com/v1/models", headers: { Authorization: "Bearer oauth-access" } }]);
+    expect(result[0].id).toBe("gpt-test");
   });
 
   it("rejects unsafe model endpoint values", async () => {

@@ -1,9 +1,10 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig } from "../src/config/load";
-import { handleModelCommand, handleProviderCommand } from "../src/tui/commands";
+import { handleConnectCommand, handleModelCommand, handleProviderCommand } from "../src/tui/commands";
 import { DiscoveryFetcher } from "../src/models/discovery";
+import { ProviderAuthStore } from "../src/models/auth-store";
 
 function visibleLength(text: string): number {
   return text.replace(/\x1b\[[0-9;]*m/g, "").length;
@@ -46,6 +47,13 @@ workspace: "."
 dataDir: ".strongcode"
 defaultAgent: default
 providers:
+  openai:
+    type: openai
+    displayName: GPT / OpenAI
+    apiKeyEnv: OPENAI_API_KEY
+    baseUrl: https://api.openai.com/v1
+    modelsEndpoint: /models
+    enabled: false
   mock:
     type: mock
     displayName: Mock
@@ -88,7 +96,7 @@ async function commandContext() {
     dataDir: ".strongcode"
   };
 
-  return { configPath, config: loaded.value.config, state, noColor: true };
+  return { configPath, config: loaded.value.config, state, noColor: true, authStore: new ProviderAuthStore(path.join(root, ".strongcode")) };
 }
 
 describe("provider tui commands", () => {
@@ -119,6 +127,89 @@ describe("provider tui commands", () => {
     expectStrongCodeSurface(details);
   });
 
+  it("renders connect guidance and stores provider auth outside config", async () => {
+    const context = await commandContext();
+
+    const guidance = await handleConnectCommand("/connect", context);
+    const connected = await handleConnectCommand("/connect custom test-key", context);
+    const authFile = await readFile(context.authStore.filePath, "utf8");
+
+    expect(guidance).toContain("/connect <provider-id> <api-key>");
+    expect(guidance).toContain("/connect openai chatgpt-browser");
+    expect(connected).toContain("Connected custom; credentials saved in auth.json");
+    expect(authFile).toContain("test-key");
+    expect(context.config.providers.custom.enabled).toBe(true);
+    expect(JSON.stringify(context.config)).not.toContain("test-key");
+    expectBounded([guidance, connected].join("\n"));
+  });
+
+  it("keeps custom connect guidance API-key only and shows ChatGPT methods for OpenAI", async () => {
+    const context = await commandContext();
+
+    const customGuidance = await handleConnectCommand("/connect custom", context);
+    const openaiGuidance = await handleConnectCommand("/connect openai", context);
+    const unsupportedAuthArgument = await handleConnectCommand(`/connect custom ${["o", "auth"].join("")}`, context);
+
+    expect(customGuidance).toContain("Auth methods: api_key");
+    expect(customGuidance).not.toMatch(/oauth/i);
+    expect(openaiGuidance).toContain("Auth methods: api_key, oauth");
+    expect(openaiGuidance).toContain("chatgpt-browser");
+    expect(unsupportedAuthArgument).toBe("Usage: /connect custom <api-key>.");
+    expect(unsupportedAuthArgument).not.toMatch(/oauth/i);
+  });
+
+  it("starts ChatGPT browser OAuth through the connect command without leaking verifier state", async () => {
+    const context = await commandContext();
+
+    const output = await handleConnectCommand("/connect openai chatgpt-browser", {
+      ...context,
+      oauthOptions: {
+        openUrl: async () => false,
+        callbackTimeoutMs: 10
+      }
+    });
+
+    expect(output).toContain("Started ChatGPT browser login for openai");
+    expect(output).toContain("https://auth.openai.com/oauth/authorize");
+    expect(output).not.toContain("code_verifier");
+    expect(output).not.toContain("refresh");
+    expectBounded(output);
+  });
+
+  it("starts ChatGPT headless OAuth through the connect command with a device code", async () => {
+    const context = await commandContext();
+
+    const output = await handleConnectCommand("/connect openai chatgpt-headless", {
+      ...context,
+      oauthOptions: {
+        callbackTimeoutMs: 0,
+        fetcher: async () => ({
+          ok: true,
+          status: 200,
+          async json() {
+            return { device_auth_id: "device-123", user_code: "ABCD-EFGH", interval: "1" };
+          }
+        })
+      }
+    });
+
+    expect(output).toContain("Started ChatGPT headless login for openai");
+    expect(output).toContain("Enter code: ABCD-EFGH");
+    expect(output).toContain("https://auth.openai.com/codex/device");
+    expect(output).not.toContain("device-123");
+    expectBounded(output);
+  });
+
+  it("removes provider auth", async () => {
+    const context = await commandContext();
+
+    await handleConnectCommand("/connect custom test-key", context);
+    const removed = await handleConnectCommand("/connect remove custom", context);
+
+    expect(removed).toContain("Removed auth for custom");
+    expect(await context.authStore.all()).toEqual({});
+  });
+
   it("discovers custom models and enables a selected model", async () => {
     await withEnv("CUSTOM_PROVIDER_API_KEY", "test-key", async () => {
       const context = await commandContext();
@@ -138,6 +229,23 @@ describe("provider tui commands", () => {
       const enabled = await handleProviderCommand("/provider enable model custom-model", commandContextWithFetcher);
       expect(enabled).toContain("Enabled model custom-model");
     });
+  });
+
+  it("uses auth storage for provider model discovery", async () => {
+    const context = await commandContext();
+    await handleConnectCommand("/connect custom stored-key", context);
+    const fetcher: DiscoveryFetcher = async (_url, init) => ({
+      ok: true,
+      status: 200,
+      async json() {
+        expect(init.headers).toEqual({ Authorization: "Bearer stored-key" });
+        return { data: [{ id: "custom-auth-model" }] };
+      }
+    });
+
+    const discovered = await handleProviderCommand("/provider models custom", { ...context, discoverFetcher: fetcher });
+
+    expect(discovered).toContain("custom-auth-model");
   });
 
   it("preserves enabled model state when rediscovering", async () => {

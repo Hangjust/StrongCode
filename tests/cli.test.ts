@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createProgram } from "../src/cli";
+import { ProviderAuthStore } from "../src/models/auth-store";
 import { tempWorkspace } from "./helpers";
 
 async function runCli(args: string[]): Promise<{ stdout: string[]; stderr: string[] }> {
@@ -59,5 +60,56 @@ permissions:
     
     // Verify TUI header is not printed
     expect(validate.stdout.join("")).not.toContain("StrongCode");
+  });
+
+  it("runs OpenAI-compatible models with auth.json credentials", async () => {
+    const workspace = await tempWorkspace();
+    const configPath = path.join(workspace.root, "strongcode.config.yaml");
+    await writeFile(configPath, `version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: default
+providers:
+  custom:
+    type: openai-compatible
+    displayName: Custom Provider
+    apiKeyEnv: STRONGCODE_TEST_API_KEY
+    baseUrl: https://example.com/v1
+    modelsEndpoint: /models
+    enabled: true
+agents:
+  default:
+    model: custom-model
+    tools: []
+models:
+  custom-model:
+    provider: custom
+    model: provider-model
+    enabled: true
+permissions:
+  tools: {}
+`, "utf8");
+    await new ProviderAuthStore(workspace.context.dataDir).set("custom", { type: "api", key: "auth-json-key" });
+
+    const originalApiKey = process.env.STRONGCODE_TEST_API_KEY;
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ authorization: string | undefined }> = [];
+    delete process.env.STRONGCODE_TEST_API_KEY;
+    globalThis.fetch = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      calls.push({ authorization: headers.get("authorization") ?? undefined });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "auth store response" } }] }), { status: 200 });
+    };
+
+    try {
+      const run = await runCli(["run", "hello", "--config", configPath, "--session", "auth-json"]);
+
+      expect(run.stdout.join("")).toContain("auth store response");
+      expect(calls).toEqual([{ authorization: "Bearer auth-json-key" }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalApiKey === undefined) delete process.env.STRONGCODE_TEST_API_KEY;
+      else process.env.STRONGCODE_TEST_API_KEY = originalApiKey;
+    }
   });
 });

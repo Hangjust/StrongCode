@@ -1,4 +1,5 @@
 import type { ProviderConfig, StrongCodeConfig } from "../config/schema";
+import type { ProviderCatalog } from "../models/catalog";
 import { orderedProviders } from "../models/registry";
 
 export interface TuiState {
@@ -289,6 +290,7 @@ export function renderHints(noColor: boolean = false): string {
     "  /sessions   List sessions",
     "  /model      Open model picker or /model <id>",
     "  /models     List active provider models",
+    "  /connect    Connect provider auth",
     "  /provider   Inspect providers and setup guidance",
     "  /provider configure custom <base-url> <api-key-env>",
     "  /provider models <id>   Discover/list provider models",
@@ -337,20 +339,23 @@ function providerEnabled(provider: ProviderConfig): boolean {
   return provider.enabled !== false;
 }
 
-function providerCredentialStatus(provider: ProviderConfig): string {
+function providerCredentialStatus(provider: ProviderConfig, connectedByAuth = false): string {
   if (!provider.apiKeyEnv) return "no key required";
   const env = sanitizeDisplayValue(provider.apiKeyEnv, "unknown");
+  if (connectedByAuth && !process.env[provider.apiKeyEnv]) return "auth.json (set)";
   return process.env[provider.apiKeyEnv] ? `env ${env} (set)` : `env ${env} (missing)`;
 }
 
-export function renderProviderList(config: StrongCodeConfig, state: TuiState, noColor: boolean = false): string {
+export function renderProviderList(config: StrongCodeConfig, state: TuiState, noColor: boolean = false, catalog?: ProviderCatalog): string {
   const left = ["", sectionTitle("◆", "Providers", noColor), rule("connections", FEED_WIDTH, noColor)];
+  const catalogByProvider = new Map((catalog?.all ?? []).map(provider => [provider.id, provider]));
   for (const provider of orderedProviders(config.providers)) {
-    const marker = providerEnabled(provider.config) ? paint("●", STYLE.success, noColor) : paint("○", STYLE.muted, noColor);
+    const catalogProvider = catalogByProvider.get(provider.id);
+    const marker = catalogProvider?.connected || providerEnabled(provider.config) ? paint("●", STYLE.success, noColor) : paint("○", STYLE.muted, noColor);
     const providerId = sanitizeDisplayValue(provider.id, "unknown");
     const displayName = sanitizeDisplayValue(provider.config.displayName, providerId);
-    const status = providerEnabled(provider.config) ? "enabled" : "disabled";
-    const env = providerCredentialStatus(provider.config);
+    const status = `${providerEnabled(provider.config) ? "enabled" : "disabled"} · ${catalogProvider?.runtimeSupport ?? "supported"}`;
+    const env = providerCredentialStatus(provider.config, catalogProvider?.connected ?? false);
     const baseUrl = provider.config.baseUrl ? `base ${sanitizeDisplayValue(provider.config.baseUrl, "")}` : "base not configured";
     left.push(`${marker} ${providerId}`);
     left.push(`   ${displayName} · ${status}`);
@@ -360,16 +365,17 @@ export function renderProviderList(config: StrongCodeConfig, state: TuiState, no
   return splitRows(left, sidebar("providers", state, [], noColor), noColor);
 }
 
-export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, noColor: boolean = false): string {
+export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, noColor: boolean = false, catalog?: ProviderCatalog): string {
   const agent = config.agents[config.defaultAgent];
   const model = config.models[agent.model];
   if (!model) return splitRows(["", "Configured default model is missing."], sidebar("provider", state, [], noColor), noColor);
 
   const provider = config.providers[model.provider];
+  const catalogProvider = catalog?.all.find(item => item.id === model.provider);
   const providerName = sanitizeDisplayValue(provider?.displayName ?? model.provider, "unknown");
   const providerId = sanitizeDisplayValue(model.provider, "unknown");
   const modelName = sanitizeDisplayValue(agent.model, "unknown");
-  const apiKey = provider ? providerCredentialStatus(provider) : "provider missing";
+  const apiKey = provider ? providerCredentialStatus(provider, catalogProvider?.connected ?? false) : "provider missing";
   const baseUrl = provider?.baseUrl ? sanitizeDisplayValue(provider.baseUrl, "") : "not configured";
   const left = [
     "",
@@ -380,7 +386,9 @@ export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, n
     `Current model     ${modelName}`,
     `API key           ${apiKey}`,
     `Base URL          ${baseUrl}`,
+    `Runtime           ${catalogProvider?.runtimeSupport ?? "supported"}`,
     "",
+    "Connect /connect",
     "Next /provider list",
     "Models /provider models <id>",
     "Setup /provider configure custom",
@@ -388,6 +396,31 @@ export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, n
     ...promptBlock(state, FEED_WIDTH, noColor, "Connect a provider")
   ];
   return splitRows(left, sidebar("provider", state, [], noColor), noColor);
+}
+
+export function renderConnectPanel(config: StrongCodeConfig, state: TuiState, noColor: boolean = false, catalog?: ProviderCatalog): string {
+  const connected = catalog?.connected.length ? catalog.connected.join(", ") : "none";
+  const left = [
+    "",
+    sectionTitle("◆", "Connect", noColor),
+    rule("provider auth", FEED_WIDTH, noColor),
+    `Connected ${sanitizeDisplayValue(connected, "none")}`,
+    "",
+    "Use /connect <provider-id> <api-key>",
+    "Use /connect openai chatgpt-browser",
+    "Use /connect openai chatgpt-headless",
+    "Use /connect remove <provider-id>",
+    "",
+    ...orderedProviders(config.providers).map(provider => {
+      const catalogProvider = catalog?.all.find(item => item.id === provider.id);
+      const marker = catalogProvider?.connected ? "●" : "○";
+      const runtime = catalogProvider?.runtimeSupport ?? "supported";
+      return `${marker} ${sanitizeDisplayValue(provider.id, "unknown")} · ${runtime}`;
+    }),
+    "",
+    ...promptBlock(state, FEED_WIDTH, noColor, "Connect a provider")
+  ];
+  return splitRows(left, sidebar("connect", state, [], noColor), noColor);
 }
 
 export function renderModelList(config: StrongCodeConfig, providerId: string, state: TuiState, noColor: boolean = false): string {

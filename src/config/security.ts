@@ -1,4 +1,4 @@
-export const forbiddenConfigKeys = new Set(["apiKey", "api_key", "apikey", "token", "accessToken", "access_token", "secret", "password", "authorization", "bearerToken", "bearer_token"]);
+export const forbiddenConfigKeys = new Set(["apiKey", "api_key", "apikey", "token", "accessToken", "access_token", "refreshToken", "refresh_token", "idToken", "id_token", "clientSecret", "client_secret", "secret", "password", "authorization", "bearerToken", "bearer_token"]);
 
 export function isSecretLikeConfigKey(key: string): boolean {
   const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();

@@ -1,5 +1,6 @@
 import { StrongCodeError } from "../core/errors";
 import { resolveProviderCredentials } from "./credentials";
+import type { ProviderAuthReader } from "./auth-store";
 import { buildProviderUrl } from "./provider-url";
 
 export interface DiscoveredModel {
@@ -18,6 +19,7 @@ export interface DiscoveryProviderConfig {
   baseUrl?: string;
   modelsEndpoint?: string;
   enabled?: boolean;
+  authStore?: ProviderAuthReader;
 }
 
 export interface DiscoveryResponse {
@@ -53,10 +55,10 @@ export function globalFetchTransport(): DiscoveryFetcher {
 
 export async function discoverOpenAICompatibleModels(providerConfig: DiscoveryProviderConfig, fetcher: DiscoveryFetcher): Promise<DiscoveredModel[]> {
   const url = buildModelsUrl(providerConfig);
-  const credentials = providerConfig.apiKeyEnv ? resolveProviderCredentials(providerConfig.id ?? "custom", providerConfig) : undefined;
+  const credentials = providerConfig.apiKeyEnv || providerConfig.authStore ? await resolveProviderCredentials(providerConfig.id ?? "custom", providerConfig, { authStore: providerConfig.authStore }) : undefined;
   const response = await fetcher(url, {
     method: "GET",
-    headers: credentials ? { Authorization: `Bearer ${credentials.apiKey}` } : {}
+    headers: credentials ? { Authorization: `Bearer ${credentials.type === "oauth" ? credentials.access : credentials.apiKey}` } : {}
   });
 
   if (!response.ok) {

@@ -4,7 +4,9 @@ import { orderedProviders } from "../models/registry";
 
 export interface TuiState {
   provider: string;
+  providerDisplayName?: string;
   model?: string;
+  modelDisplayName?: string;
   defaultAgent: string;
   configPath: string;
   configMissing: boolean;
@@ -33,9 +35,6 @@ const STYLE = {
 };
 
 const SCREEN_WIDTH = 80;
-const HOME_PROMPT_WIDTH = 75;
-const HOME_PROMPT_LEFT = Math.floor((SCREEN_WIDTH - HOME_PROMPT_WIDTH) / 2);
-const HOME_INPUT_COLUMN = HOME_PROMPT_LEFT + 3;
 const SIDEBAR_WIDTH = 42;
 const SPLIT_WIDTH = 1;
 const FEED_WIDTH = SCREEN_WIDTH - SIDEBAR_WIDTH - SPLIT_WIDTH;
@@ -47,6 +46,10 @@ const LOGO = [
   ["██ ██ ", "  ██  ", "██  ██", "██  ██", "██  ██", "██  ██", "██    ", "██  ██", "██  ██", "██    "].join(" "),
   ["██████", "  ██  ", "██  ██", "██████", "██  ██", "██████", "██████", "██████", "█████ ", "██████"].join(" ")
 ];
+const LOGO_WIDTH = Math.max(...LOGO.map(line => line.length));
+const HOME_PROMPT_WIDTH = LOGO_WIDTH;
+const HOME_PROMPT_LEFT = Math.floor((SCREEN_WIDTH - HOME_PROMPT_WIDTH) / 2);
+const HOME_INPUT_COLUMN = HOME_PROMPT_LEFT + 3;
 
 function applyStyle(text: string, style: string, noColor: boolean): string {
   return noColor ? text : `${style}${text}${STYLE.reset}`;
@@ -147,11 +150,6 @@ function wrapText(message: string, width: number): string[] {
   return lines;
 }
 
-function titlecase(value: string): string {
-  const safe = sanitizeDisplayValue(value, "");
-  return safe ? `${safe[0].toUpperCase()}${safe.slice(1)}` : safe;
-}
-
 function providerLabel(state: TuiState): string {
   const provider = sanitizeDisplayValue(state.provider, "");
   return provider && provider !== "N/A" ? provider : "local";
@@ -162,9 +160,20 @@ function modelLabel(state: TuiState): string {
   return model && model !== "N/A" ? model : "mock";
 }
 
-function agentLabel(state: TuiState): string {
-  const agent = sanitizeDisplayValue(state.defaultAgent, "");
-  return titlecase(agent && agent !== "N/A" ? agent : "default");
+function providerDisplayLabel(state: TuiState): string {
+  const id = providerLabel(state);
+  const displayName = sanitizeDisplayValue(state.providerDisplayName, "").trim();
+  return displayName && displayName !== id ? `${displayName} (${id})` : id;
+}
+
+function modelDisplayLabel(state: TuiState): string {
+  const id = modelLabel(state);
+  const displayName = sanitizeDisplayValue(state.modelDisplayName, "").trim();
+  return displayName && displayName !== id ? `${displayName} (${id})` : id;
+}
+
+function strongCodeModelLine(state: TuiState): string {
+  return `Strong Code · ${modelDisplayLabel(state)}`;
 }
 
 function splitRows(left: string[], right: string[], noColor: boolean): string {
@@ -182,17 +191,21 @@ function footer(state: TuiState, noColor: boolean): string {
   const connected = !state.configMissing;
   const lsp = connected ? paint("•", STYLE.success, noColor) : paint("•", STYLE.muted, noColor);
   const mcp = connected ? paint("⊙", STYLE.success, noColor) : paint("⊙", STYLE.muted, noColor);
-  const right = `${lsp} 0 LSP  ${mcp} 0 MCP  ${paint("/status", STYLE.muted, noColor)}`;
+  const right = `${lsp} 0 LSP  ${mcp} 0 MCP  ${paint("/connect", STYLE.muted, noColor)}`;
   return `${paint("▔", STYLE.border, noColor)} ${padVisible(paint(directory, STYLE.muted, noColor), SCREEN_WIDTH - visibleLength(right) - 2)}${right}`;
 }
 
 function sidebar(title: string, state: TuiState, content: string[], noColor: boolean): string[] {
+  const details = content.length > 0 ? content : [
+    `Active model: ${modelDisplayLabel(state)}`,
+    `Provider: ${providerDisplayLabel(state)}`
+  ];
   return [
     "",
     `  ${paint("STRONGCODE", STYLE.primary, noColor)} ${paint("//", STYLE.border, noColor)} ${paint(clip(sanitizeDisplayValue(title, "local"), 20), STYLE.text, noColor)}`,
     `  ${paint("─".repeat(SIDEBAR_WIDTH - 4), STYLE.border, noColor)}`,
-    ...content.map(line => `  ${paint("›", STYLE.accent, noColor)} ${paint(clip(sanitizeDisplayValue(line, ""), SIDEBAR_WIDTH - 6), STYLE.muted, noColor)}`),
-    ...Array(Math.max(0, 10 - content.length)).fill(""),
+    ...details.map(line => `  ${paint("›", STYLE.accent, noColor)} ${paint(clip(sanitizeDisplayValue(line, ""), SIDEBAR_WIDTH - 6), STYLE.muted, noColor)}`),
+    ...Array(Math.max(0, 10 - details.length)).fill(""),
     `  ${paint("●", STYLE.success, noColor)} ${paint("StrongCode", STYLE.text, noColor)} ${paint("0.1.0", STYLE.muted, noColor)}`,
     `  ${paint("⌁", STYLE.border, noColor)} ${paint(clip(sanitizeDisplayValue(state.workspace, "."), SIDEBAR_WIDTH - 6), STYLE.muted, noColor)}`
   ];
@@ -200,13 +213,11 @@ function sidebar(title: string, state: TuiState, content: string[], noColor: boo
 
 function promptBlock(state: TuiState, width: number, noColor: boolean, placeholder: string): string[] {
   const inner = width - 3;
-  const meta = `StrongCode · ${agentLabel(state)} · ${modelLabel(state)} · ${providerLabel(state)}`;
-  const hints = "";
+  const meta = strongCodeModelLine(state);
   const accent = paint("┃", STYLE.primary, noColor);
   return [
     `${accent}${paint(padVisible(`  Ask anything... \"${placeholder}\"`, inner), STYLE.muted, noColor, STYLE.element)}`,
-    `${accent}${paint(padVisible(`  ${meta}`, inner), STYLE.primary, noColor, STYLE.element)}`,
-    padVisible(paint(hints, STYLE.text, noColor), width)
+    `${accent}${paint(padVisible(`  ${meta}`, inner), STYLE.primary, noColor, STYLE.element)}`
   ];
 }
 
@@ -257,7 +268,8 @@ export function renderHomeWithPrompt(state: TuiState, noColor: boolean = false):
     "",
     "",
     ...LOGO.map(line => center(paint(line, STYLE.primary, noColor))),
-    center(paint("LOCAL AGENT FORGE  //  TUI OPERATIONS CONSOLE", STYLE.muted, noColor)),
+    "",
+    "",
     "",
     ...prompt.map(line => center(line)),
     "",
@@ -286,29 +298,8 @@ export function renderHints(noColor: boolean = false): string {
   const lines = [
     sectionTitle("◆", "Command Deck", noColor),
     rule("navigation", SCREEN_WIDTH, noColor),
-    "  /help       Show help",
-    "  /sessions   List sessions",
-    "  /model      Open model picker or /model <id>",
-    "  /models     List active provider models",
     "  /connect    Connect provider auth",
-    "  /provider   Inspect providers and setup guidance",
-    "  /provider configure custom <base-url> <api-key-env>",
-    "  /provider models <id>   Discover/list provider models",
-    "  /commands   Show command palette",
-    "  /toast      Show toast stack",
-    "  /plugins    Show TUI plugin slots",
-    "  /whichkey   Show leader key hints",
-    "  /diff       Show diff review surface",
-    "  /approve    Show tool approval surface",
-    "  /pick       Show picker surface",
-    "  /paste      Show paste/editor surface",
-    "  /new        New session",
-    "  /undo       Undo previous message",
-    "  /redo       Redo",
-    "  /compact    Compact session",
-    "  /themes     Select theme",
-    "  /status     Show status",
-    "  /exit       Quit",
+    "  /model      Show and switch models",
     "",
     sectionTitle("◆", "Prompt Grammar", noColor),
     "  @ files   ! shell mode   / commands"
@@ -325,8 +316,8 @@ export function renderStatus(state: TuiState, noColor: boolean = false): string 
     `State      ${connected ? paint("connected", STYLE.success, noColor) : paint("disconnected", STYLE.warning, noColor)}`,
     metric("Session", "local"),
     metric("Directory", sanitizeDisplayValue(state.workspace, ".")),
-    metric("Provider", providerLabel(state)),
-    metric("Model", modelLabel(state)),
+    metric("Provider", providerDisplayLabel(state)),
+    metric("Model", modelDisplayLabel(state)),
     metric("Agent", sanitizeDisplayValue(state.defaultAgent, "build")),
     metric("DataDir", sanitizeDisplayValue(state.dataDir)),
     "",
@@ -375,6 +366,7 @@ export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, n
   const providerName = sanitizeDisplayValue(provider?.displayName ?? model.provider, "unknown");
   const providerId = sanitizeDisplayValue(model.provider, "unknown");
   const modelName = sanitizeDisplayValue(agent.model, "unknown");
+  const modelDisplayName = sanitizeDisplayValue(model.displayName, modelName);
   const apiKey = provider ? providerCredentialStatus(provider, catalogProvider?.connected ?? false) : "provider missing";
   const baseUrl = provider?.baseUrl ? sanitizeDisplayValue(provider.baseUrl, "") : "not configured";
   const left = [
@@ -383,15 +375,12 @@ export function renderProviderPanel(config: StrongCodeConfig, state: TuiState, n
     rule("active route", FEED_WIDTH, noColor),
     `Current provider  ${providerId} (${providerName})`,
     `Current status    ${providerEnabled(provider ?? { type: "unknown", displayName: model.provider }) ? "enabled" : "disabled"}`,
-    `Current model     ${modelName}`,
+    `Current model     ${modelDisplayName}${modelDisplayName !== modelName ? ` (${modelName})` : ""}`,
     `API key           ${apiKey}`,
     `Base URL          ${baseUrl}`,
     `Runtime           ${catalogProvider?.runtimeSupport ?? "supported"}`,
     "",
     "Connect /connect",
-    "Next /provider list",
-    "Models /provider models <id>",
-    "Setup /provider configure custom",
     "",
     ...promptBlock(state, FEED_WIDTH, noColor, "Connect a provider")
   ];
@@ -427,13 +416,37 @@ export function renderModelList(config: StrongCodeConfig, providerId: string, st
   const safeProviderId = sanitizeDisplayValue(providerId, "unknown");
   const left = ["", sectionTitle("◆", "Models", noColor), rule(`for ${safeProviderId}`, FEED_WIDTH, noColor), ""];
   const models = Object.entries(config.models).filter(([, model]) => model.provider === providerId);
-  if (models.length === 0) left.push(`No models configured. Use /provider models ${safeProviderId} to discover.`);
+  if (models.length === 0) left.push(`No models configured for ${safeProviderId}.`);
   for (const [modelId, model] of models) {
     const active = state.model === modelId;
     const marker = active ? paint(">", STYLE.secondary, noColor) : model.enabled !== false ? paint("●", STYLE.success, noColor) : paint("○", STYLE.muted, noColor);
-    left.push(`${marker} ${sanitizeDisplayValue(modelId, "unknown")}`);
+    const modelName = sanitizeDisplayValue(model.displayName, modelId);
+    left.push(`${marker} ${modelName}${modelName !== modelId ? ` (${sanitizeDisplayValue(modelId, "unknown")})` : ""}`);
   }
   left.push("");
-  left.push("Type /model <id> to enable and set the active model.");
+  left.push("Select a model from the connect flow to set it active.");
   return splitRows(left, sidebar("models", state, [], noColor), noColor);
 }
+
+export function renderAllModelList(config: StrongCodeConfig, state: TuiState, noColor: boolean = false): string {
+  const left = ["", sectionTitle("◆", "Models", noColor), rule("available", FEED_WIDTH, noColor), ""];
+  const models = Object.entries(config.models).sort(([leftId, left], [rightId, right]) => {
+    const providerDelta = left.provider.localeCompare(right.provider);
+    if (providerDelta !== 0) return providerDelta;
+    return leftId.localeCompare(rightId);
+  });
+
+  if (models.length === 0) left.push("No models configured.");
+  for (const [modelId, model] of models) {
+    const active = state.model === modelId;
+    const marker = active ? paint(">", STYLE.secondary, noColor) : model.enabled !== false ? paint("●", STYLE.success, noColor) : paint("○", STYLE.muted, noColor);
+    const providerName = sanitizeDisplayValue(config.providers[model.provider]?.displayName ?? model.provider, model.provider);
+    const modelName = sanitizeDisplayValue(model.displayName ?? model.model, modelId);
+    const suffix = modelName !== modelId ? ` (${sanitizeDisplayValue(modelId, "unknown")})` : "";
+    left.push(`${marker} ${providerName} · ${modelName}${suffix}`);
+  }
+  left.push("");
+  left.push("Use /model to open the selector and choose one.");
+  return splitRows(left, sidebar("models", state, [], noColor), noColor);
+}
+

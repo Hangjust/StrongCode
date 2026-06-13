@@ -51,25 +51,10 @@ export class CommandPalette {
 
 export function createDefaultPalette(): CommandPalette {
   return new CommandPalette([
-    { id: "help", title: "Help", description: "Show command and keybinding help", slash: "/help" },
-    { id: "status", title: "Status", description: "Show runtime, provider, and route status", slash: "/status" },
-    { id: "sessions", title: "Sessions", description: "List saved sessions", slash: "/sessions" },
-    { id: "new", title: "New Session", description: "Start a fresh local session view", slash: "/new" },
-    { id: "model", title: "Model", description: "Open active model picker or select /model <id>", slash: "/model" },
-    { id: "models", title: "Models", description: "List active provider models", slash: "/models" },
     { id: "connect", title: "Connect", description: "Connect a provider with /connect <provider> <api-key>", slash: "/connect" },
-    { id: "themes", title: "Themes", description: "Show active theme and theme config location", slash: "/themes" },
-    { id: "plugins", title: "Plugins", description: "Show registered TUI plugin slots", slash: "/plugins" },
-    { id: "whichkey", title: "Which Key", description: "Show leader-key sequence hints", slash: "/whichkey" },
-    { id: "diff", title: "Diff", description: "Review a file diff", slash: "/diff" },
-    { id: "approve", title: "Approval", description: "Review a tool approval request", slash: "/approve" },
-    { id: "pick", title: "Picker", description: "Show a generic selectable list", slash: "/pick" },
-    { id: "paste", title: "Editor Paste", description: "Preview pasted or editor content", slash: "/paste" },
-    { id: "provider", title: "Provider", description: "Inspect providers; connect with /connect", slash: "/provider" },
-    { id: "providers", title: "Providers", description: "Open provider picker", slash: "/providers" },
-    { id: "commands", title: "Command Palette", description: "List palette commands", slash: "/commands" },
-    { id: "toast", title: "Toasts", description: "Show toast stack", slash: "/toast" },
-    { id: "exit", title: "Exit", description: "Quit the TUI", slash: "/exit" }
+    { id: "model", title: "Model", description: "Show and switch the active model", slash: "/model" },
+    { id: "models", title: "Models", description: "Alias for /model", slash: "/models" },
+    { id: "exit", title: "Exit", description: "Close StrongCode", slash: "/exit" }
   ]);
 }
 

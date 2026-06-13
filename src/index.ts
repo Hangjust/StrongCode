@@ -15,6 +15,7 @@ export type { CatalogProvider, ProviderCatalog } from "./models/catalog";
 export { ProviderService, listProviders } from "./models/provider-service";
 export { discoverOpenAICompatibleModels } from "./models/discovery";
 export type { DiscoveryFetcher, DiscoveredModel } from "./models/discovery";
+export { loadJsonModelCatalog, modelCatalogPath, DEFAULT_MODEL_CATALOG_FILE } from "./models/json-catalog";
 export { SessionStore } from "./sessions/session-store";
 export { createDefaultToolRegistry, ToolRegistry } from "./tools/registry";
 export { assertToolAllowed, getToolPermission } from "./tools/permissions";

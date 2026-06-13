@@ -1,7 +1,7 @@
-import { renderHome, renderSessionLayout, renderStatus, renderHints } from "../src/tui/render";
-import { activeCustomProviderModelRows, apiKeyEnvForProviderId, connectCommandForProviderAuthMethod, draftHomeCommandOverlay, exactHomeCommandOverlay, isProviderPopupOverlay, isValidCustomProviderId, navigationKeyName, nextSelectionIndex, promptDraftAfterEscape, providerAuthOverlayForMethods, providerDialogTitle, providerPickerDescription, providerPickerPriority, runTui, scrollTopForSelectedRow, selectedSlashCommand, selectedTextForClipboard, shouldAutoDiscoverCustomProviderModels, shouldCopySelectionForInput, shouldCopySelectionForMouse, shouldSubmitHomePrompt, shouldSubmitHomeValue } from "../src/tui/app";
+import { renderAllModelList, renderHome, renderSessionLayout, renderStatus, renderHints } from "../src/tui/render";
+import { activeCustomProviderModelRows, apiKeyEnvForProviderId, connectCommandForProviderAuthMethod, customProviderCursorOffset, customProviderEndpointLoadingText, customProviderFetchingModelsText, draftHomeCommandOverlay, exactHomeCommandOverlay, isProviderPopupOverlay, isValidCustomProviderId, navigationKeyName, nextSelectionIndex, promptDraftAfterEscape, providerAuthOverlayForMethods, providerDialogRowCount, providerDialogSelectedRowIndex, providerDialogTitle, providerPickerDescription, providerPickerPriority, runTui, scrollTopForSelectedRow, selectedCustomProviderModels, selectedSlashCommand, selectedTextForClipboard, shouldAutoDiscoverCustomProviderModels, shouldCopySelectionForInput, shouldCopySelectionForMouse, shouldRefreshCustomProviderDiscoveryPanel, shouldSubmitHomePrompt, shouldSubmitHomeValue, slashOverlayTop, toggleCustomProviderSelectedModel } from "../src/tui/app";
 import { PassThrough } from "node:stream";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { defaultTuiConfig } from "../src/tui/config/tui";
@@ -33,6 +33,10 @@ function expectNoControlSequences(output: string): void {
   expect(output).not.toMatch(/\x1b\]/);
   expect(output).not.toMatch(/\x1b\[/);
   expect(output).not.toMatch(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/);
+}
+
+function countOccurrences(output: string, value: string): number {
+  return output.split(value).length - 1;
 }
 
 async function runScriptedTui(lines: string[]): Promise<string> {
@@ -69,6 +73,7 @@ describe("tui", () => {
     const state = {
       provider: "very-long-provider-name-that-should-be-clipped",
       model: "very-long-model-name-that-should-be-clipped",
+      modelDisplayName: "GPT-5.5",
       defaultAgent: "default",
       configPath: "strongcode.config.yaml",
       configMissing: false,
@@ -79,13 +84,22 @@ describe("tui", () => {
      const home = renderHome(state, true);
      
     expect(home).toContain("██████ ██████ █████");
+    expect(home).toContain("Strong Code · GPT-5.5");
     expect(home).toContain("Ask anything...");
-    expect(home).toContain("Default ·");
+    expect(countOccurrences(home, "Strong Code ·")).toBe(1);
+    const logoLine = home.split("\n").find(line => line.includes("██████ ██████ █████"));
+    const promptLine = home.split("\n").find(line => line.includes("Ask anything..."));
+    expect(logoLine).toBeDefined();
+    expect(promptLine).toBeDefined();
+    expect(promptLine?.indexOf("┃")).toBeGreaterThanOrEqual(logoLine?.search(/\S/) ?? 0);
+    expect(home).not.toContain("LOCAL AGENT FORGE");
+    expect(home).not.toContain("TUI OPERATIONS CONSOLE");
+    expect(home).not.toContain("it says");
     expect(home).not.toContain("ctrl+x agents");
     expect(home).not.toContain("ctrl+x commands");
     expect(home).not.toContain("N/A");
     expect(home).not.toContain("▀");
-    expect(home).toContain("/status");
+    expect(home).toContain("/connect");
     expectBounded(home);
   });
 
@@ -152,8 +166,8 @@ describe("tui", () => {
   it("renders colorized hints with bounded visible lines", () => {
     const hints = renderHints(false);
     expectBounded(hints);
-    expect(hints).toContain("/sessions");
-    expect(hints).toContain("/commands");
+    expect(hints).toContain("/connect");
+    expect(hints).not.toContain("/commands");
     expect(hints).not.toContain("ctrl+x leader");
     expect(hints).not.toContain("ctrl+k leader");
   });
@@ -170,8 +184,9 @@ describe("tui", () => {
     expect(keybinds.command_palette).toEqual(["p"]);
     expect(keybinds.app_exit).toEqual([]);
     expect(descriptions.join("\n")).toContain("command_palette");
-    expect(palette.find("/commands")?.title).toBe("Command Palette");
-    expect(palette.search("theme")[0]?.slash).toBe("/themes");
+    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/model", "/models", "/exit"]);
+    expect(palette.find("/commands")).toBeUndefined();
+    expect(palette.search("theme")).toEqual([]);
   });
 
   it("cycles prompt history without duplicate adjacent prompts", () => {
@@ -216,19 +231,19 @@ describe("tui", () => {
     palette.select(1);
 
     expect(runtime.render("status")).toContain("Plugin slots ready");
-    expect(renderPaletteOverlay(palette.list(), palette.cursor())).toContain("> /status");
-    expect(renderFilteredPalette(palette, "diff")).toContain("/diff");
+    expect(renderPaletteOverlay(palette.list(), palette.cursor())).toContain("> /model");
+    expect(renderFilteredPalette(palette, "con")).toContain("/connect");
+    expect(renderFilteredPalette(palette, "model")).toContain("/model");
   });
 
   it("renders slash command suggestions without the full command palette chrome", () => {
     const palette = createDefaultPalette();
-    const commands = palette.search("mod");
-    const output = renderSlashCommandOverlay(commands, 0, "mod");
+    const commands = palette.search("con");
+    const output = renderSlashCommandOverlay(commands, 0, "con");
 
     expect(output).toContain("╭");
-    expect(output).toContain("› /model");
-    expect(output).toContain("/models");
-    expect(output).toContain("Open active model picker or select");
+    expect(output).toContain("› /connect");
+    expect(output).toContain("Connect a provider");
     expect(output).not.toContain("enter run");
     expect(output).not.toContain("Slash Commands");
     expect(output).not.toContain("Command Palette");
@@ -273,6 +288,32 @@ describe("tui", () => {
     expect(scrollTopForSelectedRow(12, 12)).toBe(1);
     expect(scrollTopForSelectedRow(20, 12)).toBe(9);
     expect(scrollTopForSelectedRow(3, 0)).toBe(3);
+    const lastRowWithTopPadding = 11 + 1;
+    expect(scrollTopForSelectedRow(lastRowWithTopPadding, 12)).toBe(1);
+  });
+
+  it("positions slash command suggestions above the prompt", () => {
+    expect(slashOverlayTop(20, 6)).toBe(14);
+    expect(slashOverlayTop(3, 8)).toBe(0);
+    expect(slashOverlayTop(9, 0)).toBe(8);
+  });
+
+  it("keeps connect provider rows visible with repeated category headers", () => {
+    const options = [
+      { category: "Popular" },
+      { category: "Popular" },
+      { category: "Providers" },
+      { category: "Providers" },
+      { category: "Popular" },
+      { category: "Providers" },
+      { category: "Popular" }
+    ];
+
+    expect(providerDialogRowCount(options)).toBe(12);
+    expect(providerDialogSelectedRowIndex(options, 0)).toBe(1);
+    expect(providerDialogSelectedRowIndex(options, 4)).toBe(7);
+    expect(providerDialogSelectedRowIndex(options, 6)).toBe(11);
+    expect(scrollTopForSelectedRow(providerDialogSelectedRowIndex(options, 6), 6)).toBe(6);
   });
 
   it("copies only non-empty selected TUI text for Ctrl+C and right-click", () => {
@@ -328,7 +369,7 @@ describe("tui", () => {
     
     const hints = renderHints(true);
     expectBounded(hints);
-    expect(hints).toContain("/themes");
+    expect(hints).toContain("/connect");
   });
 
   it("runs TUI and exits", async () => {
@@ -356,25 +397,16 @@ describe("tui", () => {
     const unknownOutput = await runScriptedTui(["/unknown-command-that-is-long-enough-to-test-the-line-boundary", "/exit"]);
     const outputData = `${providerOutput}\n${unknownOutput}`;
 
-    expect(outputData).toContain("No enabled model for openai");
+    expect(outputData).toContain("Unknown command: /provider select openai");
     expect(outputData).toContain("Unknown command:");
     expectBounded(outputData);
   });
 
-  it("renders provider status for exact provider command", async () => {
-    const outputData = await runScriptedTui(["/provider", "/exit"]);
+  it("rejects removed provider slash commands", async () => {
+    const outputData = await runScriptedTui(["/provider", "/providers", "/exit"]);
 
-    expect(outputData).toContain("Current provider");
-    expect(outputData).toContain("Connect /connect");
-    expect(outputData).toContain("/provider configure custom");
-    expectBounded(outputData);
-  });
-
-  it("recognizes providers alias without falling through to unknown command", async () => {
-    const outputData = await runScriptedTui(["/providers", "/exit"]);
-
-    expect(outputData).toContain("Current provider");
-    expect(outputData).not.toContain("Unknown command: /providers");
+    expect(outputData).toContain("Unknown command: /provider");
+    expect(outputData).toContain("Unknown command: /providers");
     expectBounded(outputData);
   });
 
@@ -409,45 +441,37 @@ permissions:
   tools: {}
 `, "utf8");
 
-    const outputData = await runScriptedTuiInDirectory(root, ["/connect custom same-session-key", "/provider list", "/exit"]);
+    const outputData = await runScriptedTuiInDirectory(root, ["/connect custom same-session-key", "/exit"]);
 
     expect(outputData).toContain("Connected custom; credentials saved in auth.json");
-    expect(outputData).toContain("Custom Provider · enabled");
-    expect(outputData).toContain("auth.json (set)");
     expect(outputData).not.toContain("same-session-key");
     expectBounded(outputData);
   });
 
-  it("runs provider status from slash suggestion selection", async () => {
+  it("registers the supported startup slash suggestions", async () => {
     const palette = createDefaultPalette();
 
-    expect(palette.find("/provider")?.description).toContain("connect");
+    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/model", "/models", "/exit"]);
     expect(palette.find("/connect")?.title).toBe("Connect");
-    expect(palette.find("/providers")?.title).toBe("Providers");
+    expect(palette.find("/model")?.title).toBe("Model");
+    expect(palette.find("/exit")?.title).toBe("Exit");
+    expect(palette.find("/providers")).toBeUndefined();
   });
 
   it("resolves partial slash input through the selected suggestion", () => {
     const palette = createDefaultPalette();
     const connectSuggestions = palette.search("con").sort((left, right) => left.slash.localeCompare(right.slash));
-    const providerSuggestions = [
-      { id: "provider", title: "Provider", description: "Inspect providers", slash: "/provider" },
-      { id: "providers", title: "Providers", description: "Open provider picker", slash: "/providers" }
-    ];
 
     expect(selectedSlashCommand(connectSuggestions, 0)?.slash).toBe("/connect");
-    expect(selectedSlashCommand(providerSuggestions, 0)?.slash).toBe("/provider");
-    expect(selectedSlashCommand(providerSuggestions, 1)?.slash).toBe("/providers");
-    expect(selectedSlashCommand(providerSuggestions, 99)?.slash).toBe("/providers");
-    expect(selectedSlashCommand(providerSuggestions, -1)?.slash).toBe("/provider");
     expect(selectedSlashCommand([], 0)).toBeUndefined();
   });
 
   it("routes exact home provider and model commands to picker overlays", () => {
     expect(exactHomeCommandOverlay("/provider")).toBeUndefined();
     expect(exactHomeCommandOverlay("/connect")).toBe("providers");
-    expect(exactHomeCommandOverlay("/providers")).toBe("providers");
+    expect(exactHomeCommandOverlay("/providers")).toBeUndefined();
     expect(exactHomeCommandOverlay("/model")).toBe("models");
-    expect(exactHomeCommandOverlay("/models")).toBeUndefined();
+    expect(exactHomeCommandOverlay("/models")).toBe("models");
     expect(exactHomeCommandOverlay("/provider list")).toBeUndefined();
     expect(exactHomeCommandOverlay("hello")).toBeUndefined();
     expect(shouldSubmitHomePrompt("none")).toBe(true);
@@ -456,8 +480,9 @@ permissions:
     expect(shouldSubmitHomePrompt("models")).toBe(false);
     expect(shouldSubmitHomePrompt("slashCommands")).toBe(false);
     expect(shouldSubmitHomeValue("slashCommands", "/connect")).toBe(true);
-    expect(shouldSubmitHomeValue("slashCommands", "/providers")).toBe(true);
+    expect(shouldSubmitHomeValue("slashCommands", "/providers")).toBe(false);
     expect(shouldSubmitHomeValue("slashCommands", "/model")).toBe(true);
+    expect(shouldSubmitHomeValue("slashCommands", "/models")).toBe(true);
     expect(shouldSubmitHomeValue("slashCommands", "/con")).toBe(false);
     expect(shouldSubmitHomeValue("slashCommands", "/connect custom")).toBe(false);
     expect(shouldSubmitHomeValue("providers", "/connect")).toBe(false);
@@ -514,14 +539,53 @@ permissions:
 
   it("renders discovered custom provider models as active", () => {
     expect(activeCustomProviderModelRows(["model-a", "model-b"])).toEqual(["● model-a", "● model-b"]);
+    expect(activeCustomProviderModelRows(["model-a", "model-b"], ["model-b"])).toEqual(["○ model-a", "● model-b"]);
     expect(activeCustomProviderModelRows(["model\u001b[31m-red"])[0]).toBe("● model-red");
   });
 
-  it("auto-discovers custom provider models only when URL and key are present", () => {
+  it("toggles selected custom provider models", () => {
+    const models = ["model-a", "model-b", "model-c"];
+
+    expect(toggleCustomProviderSelectedModel(models, ["model-a", "model-c"], "model-a")).toEqual(["model-c"]);
+    expect(toggleCustomProviderSelectedModel(models, ["model-a"], "model-c")).toEqual(["model-a", "model-c"]);
+    expect(toggleCustomProviderSelectedModel(models, ["model-a", "stale"], "missing")).toEqual(["model-a"]);
+    expect(selectedCustomProviderModels(models, ["model-c", "stale", "model-a"])).toEqual(["model-a", "model-c"]);
+  });
+
+  it("detects when custom provider credentials are ready for discovery", () => {
     expect(shouldAutoDiscoverCustomProviderModels("https://api.example.com/v1", "secret-key")).toBe(true);
     expect(shouldAutoDiscoverCustomProviderModels("", "secret-key")).toBe(false);
     expect(shouldAutoDiscoverCustomProviderModels("https://api.example.com/v1", "")).toBe(false);
     expect(shouldAutoDiscoverCustomProviderModels("   ", "secret-key")).toBe(false);
+  });
+
+  it("cycles custom provider loading labels through three dot frames", () => {
+    expect([0, 1, 2, 3].map(customProviderFetchingModelsText)).toEqual([
+      "Fetching models.",
+      "Fetching models..",
+      "Fetching models...",
+      "Fetching models."
+    ]);
+    expect([0, 1, 2, 3].map(customProviderEndpointLoadingText)).toEqual([
+      "Calling endpoint.",
+      "Calling endpoint..",
+      "Calling endpoint...",
+      "Calling endpoint."
+    ]);
+  });
+
+  it("keeps custom provider input cursor offsets stable across rebuilds", () => {
+    expect(customProviderCursorOffset("https://api.example.com/v1", undefined)).toBe(26);
+    expect(customProviderCursorOffset("https://api.example.com/v1", 8)).toBe(8);
+    expect(customProviderCursorOffset("short", 99)).toBe(5);
+    expect(customProviderCursorOffset("short", -3)).toBe(0);
+  });
+
+  it("refreshes custom provider discovery only when the model panel is focused", () => {
+    expect(shouldRefreshCustomProviderDiscoveryPanel("providerAuth", "custom", 4)).toBe(true);
+    expect(shouldRefreshCustomProviderDiscoveryPanel("providerAuth", "custom", 2)).toBe(false);
+    expect(shouldRefreshCustomProviderDiscoveryPanel("providerAuth", "openai", 4)).toBe(false);
+    expect(shouldRefreshCustomProviderDiscoveryPanel("models", "custom", 4)).toBe(false);
   });
 
   it("submits prompt text when input sends a line", async () => {
@@ -532,22 +596,120 @@ permissions:
     expectBounded(outputData);
   });
 
-  it("handles new palette, themes, sessions, models, and new-session commands", async () => {
-    const outputData = await runScriptedTui(["/commands diff", "/themes", "/plugins", "/whichkey", "/diff", "/approve", "/pick", "/paste", "/sessions", "/models", "/status", "/toast", "/new", "/exit"]);
+  it("treats removed slash commands as unknown", async () => {
+    const outputData = await runScriptedTui(["/commands diff", "/themes", "/plugins", "/whichkey", "/diff", "/approve", "/pick", "/paste", "/sessions", "/status", "/toast", "/new", "/help", "/exit"]);
 
-    expect(outputData).toContain("Command Palette: diff");
-    expect(outputData).toContain("Theme ember");
-    expect(outputData).toContain("Theme Picker");
-    expect(outputData).toContain("Sessions");
+    expect(outputData).toContain("Unknown command: /commands diff");
+    expect(outputData).toContain("Unknown command: /themes");
+    expect(outputData).toContain("Unknown command: /plugins");
+    expect(outputData).toContain("Unknown command: /whichkey");
+    expect(outputData).toContain("Unknown command: /diff");
+    expect(outputData).toContain("Unknown command: /approve");
+    expect(outputData).toContain("Unknown command: /pick");
+    expect(outputData).toContain("Unknown command: /paste");
+    expect(outputData).toContain("Unknown command: /sessions");
+    expect(outputData).toContain("Unknown command: /status");
+    expect(outputData).toContain("Unknown command: /toast");
+    expect(outputData).toContain("Unknown command: /new");
+    expect(outputData).toContain("Unknown command: /help");
+  });
+
+  it("prints available model list for the model command aliases in fallback mode", async () => {
+    const outputData = await runScriptedTui(["/model", "/models", "/exit"]);
+
     expect(outputData).toContain("Models");
-    expect(outputData).toContain("Status Dashboard");
-    expect(outputData).toContain("Toast stack is active.");
-    expect(outputData).toContain("Plugin slots ready");
-    expect(outputData).toContain("Which key: disabled");
-    expect(outputData).toContain("Diff Review");
-    expect(outputData).toContain("Tool Approval");
-    expect(outputData).toContain("Editor Paste");
-    expect(outputData).toContain("Started a new local session view.");
+    expect(outputData).toContain("> Mock · mock");
+    expect(outputData).not.toContain("Unknown command: /model");
+    expect(outputData).not.toContain("Unknown command: /models");
+    expectBounded(outputData);
+  });
+
+  it("prints editable JSON catalog models for /models in fallback mode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "strongcode-tui-model-catalog-"));
+    await writeFile(path.join(root, "strongcode.config.yaml"), `version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: default
+providers:
+  mock:
+    type: mock
+    displayName: Mock
+    enabled: true
+agents:
+  default:
+    model: mock
+    tools: []
+models:
+  mock:
+    provider: mock
+    model: mock
+    enabled: true
+permissions:
+  tools: {}
+`, "utf8");
+    await mkdir(path.join(root, ".strongcode"));
+    await writeFile(path.join(root, ".strongcode", "models.json"), JSON.stringify({
+      providers: {
+        kimi: {
+          name: "Kimi",
+          env: ["MOONSHOT_API_KEY"],
+          api: "https://api.moonshot.ai/v1",
+          models: {
+            "kimi-k2": { name: "Kimi K2", id: "kimi-k2" }
+          }
+        },
+        openai: {
+          name: "GPT / OpenAI",
+          env: ["OPENAI_API_KEY"],
+          api: "https://api.openai.com/v1",
+          models: {
+            "gpt-4.1": { name: "GPT-4.1", id: "gpt-4.1" }
+          }
+        }
+      }
+    }), "utf8");
+
+    const outputData = await runScriptedTuiInDirectory(root, ["/models", "/exit"]);
+
+    expect(outputData).toContain("Kimi · Kimi K2 (kimi-k2)");
+    expect(outputData).toContain("GPT / OpenAI · GPT-4.1 (gpt-4.1)");
+    expect(outputData).not.toContain("sk-");
+    expectBounded(outputData);
+  });
+
+  it("renders all configured model names instead of only the active provider", () => {
+    const state = {
+      provider: "mock",
+      model: "mock",
+      defaultAgent: "default",
+      configPath: "strongcode.config.yaml",
+      configMissing: false,
+      workspace: ".",
+      dataDir: ".strongcode"
+    };
+    const output = renderAllModelList({
+      version: 1,
+      workspace: ".",
+      dataDir: ".strongcode",
+      defaultAgent: "default",
+      providers: {
+        mock: { type: "mock", displayName: "Mock", apiKeyEnv: undefined, baseUrl: undefined, modelsEndpoint: undefined, enabled: true },
+        kimi: { type: "openai-compatible", displayName: "Kimi", apiKeyEnv: "MOONSHOT_API_KEY", baseUrl: "https://api.moonshot.ai/v1", modelsEndpoint: "/models", enabled: true },
+        openai: { type: "openai", displayName: "GPT / OpenAI", apiKeyEnv: "OPENAI_API_KEY", baseUrl: "https://api.openai.com/v1", modelsEndpoint: "/models", enabled: true }
+      },
+      agents: { default: { model: "mock", tools: [] } },
+      models: {
+        mock: { provider: "mock", model: "mock", displayName: undefined, enabled: true, source: undefined, options: undefined },
+        "kimi-k2": { provider: "kimi", model: "kimi-k2", displayName: "kimi-k2", enabled: true, source: "discovered", options: undefined },
+        "gpt-4.1": { provider: "openai", model: "gpt-4.1", displayName: "gpt-4.1", enabled: true, source: "discovered", options: undefined }
+      },
+      permissions: { tools: {} }
+    }, state, true);
+
+    expect(output).toContain("Mock · mock");
+    expect(output).toContain("Kimi · kimi-k2");
+    expect(output).toContain("GPT / OpenAI · gpt-4.1");
+    expectBounded(output);
   });
 
   it("sanitizes unknown command text before terminal output", async () => {
@@ -559,3 +721,4 @@ permissions:
     expectBounded(outputData);
   });
 });
+

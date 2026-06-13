@@ -1,16 +1,62 @@
 # StrongCode
 
-
-
 # NOTE THIS IS STILL A WORK IN PROGRESS!
 
 ![Code Smarter](Code%20Smarter.gif)
 
-StrongCode is a small TypeScript/Node 20 scaffold for a local agent harness with a terminal-first operations console TUI. It is intentionally minimal: local configuration, JSONL sessions, provider/model management, a mock model provider, OpenAI-compatible chat completions, read-only tools, deny-by-default permissions, a CLI, and a TUI.
+StrongCode is a minimal TypeScript and Node 20 local agent harness with a terminal-first CLI and TUI. It gives you local configuration, JSONL session storage, provider and model management, mock and OpenAI-compatible model providers, read-only workspace tools, and deny-by-default tool permissions.
 
-It does not include shell execution, write/edit tools, MCP, plugins, streaming, or hidden agents.
+StrongCode is intentionally small. It does not ship shell execution, write/edit tools, MCP, plugins, streaming, or hidden agents.
 
-## Install
+## Functions Provided
+
+StrongCode provides these main capabilities:
+
+- Local project setup with `strongcode init`.
+- Config validation for `strongcode.config.yaml`.
+- An interactive terminal UI when you run `strongcode` with no arguments.
+- One-shot prompt runs from the CLI with `strongcode run`.
+- JSONL session storage and session inspection commands.
+- Provider and model management for built-in providers: GPT / OpenAI, Kimi, Claude, Grok, Mock, and Custom Provider.
+- Runtime support for `mock`, `openai`, and `openai-compatible` providers.
+- OpenAI-compatible model discovery through each provider's models endpoint.
+- ChatGPT account OAuth connection flows for OpenAI through browser or headless device-code auth.
+- Read-only built-in tools guarded by workspace boundaries and permissions.
+
+The package also exports a small library API:
+
+- Config: `loadConfig`, `strongCodeConfigSchema`, `StrongCodeConfig`.
+- Core results and errors: `StrongCodeError`, `Result`, `ok`, `err`.
+- Runtime and agents: `AgentRunner`, `createRuntimeContext`.
+- Models and providers: `MockModelProvider`, `BUILT_IN_PROVIDERS`, `orderedProviders`, `providerDefaults`, `ProviderAuthStore`, `createProviderCatalog`, `ProviderService`, `listProviders`, `discoverOpenAICompatibleModels`.
+- Sessions and tools: `SessionStore`, `createDefaultToolRegistry`, `ToolRegistry`, `assertToolAllowed`, `getToolPermission`.
+
+## Install Via Git
+
+Clone the repository, install dependencies, build the CLI, then link the local package:
+
+```sh
+git clone <repository-url> StrongCode
+cd StrongCode
+npm install
+npm run build
+npm link
+```
+
+Replace `<repository-url>` with this repository's Git URL. `npm link` registers the `strongcode` command globally on your machine, pointing at the built `dist/cli.js` file.
+
+After linking, run:
+
+```sh
+strongcode --help
+strongcode
+```
+
+If you change TypeScript source after linking, run `npm run build` again so the linked command uses the latest compiled code.
+
+## Install Locally
+
+Use this flow when you already have the project folder locally:
 
 ```sh
 npm install
@@ -18,42 +64,48 @@ npm run build
 npm link
 ```
 
-`npm link` registers the local package bin globally, so you can run `strongcode` from your terminal instead of `node dist/cli.js`.
-
-If you change TypeScript source after linking, run `npm run build` again so the terminal command uses the latest compiled code.
-
-## Use The Command
-
-From this project directory:
+You can also run the compiled CLI from the project without linking:
 
 ```sh
-strongcode
-strongcode --help
+node dist/cli.js --help
+node dist/cli.js
+```
+
+StrongCode requires Node 20 or newer.
+
+## Basic Usage
+
+Initialize a config file in the project you want StrongCode to manage:
+
+```sh
 strongcode init
+```
+
+Validate the config and inspect available tools:
+
+```sh
 strongcode config validate --config strongcode.config.yaml
 strongcode tools list --config strongcode.config.yaml
+```
+
+Run a prompt and store it in a session:
+
+```sh
 strongcode run "hello" --config strongcode.config.yaml --session demo
+```
+
+Inspect saved sessions:
+
+```sh
+strongcode session list --config strongcode.config.yaml
 strongcode session show demo --config strongcode.config.yaml
 ```
 
-After `npm link`, the `strongcode` command is available in any terminal. Running `strongcode` with no arguments opens the interactive TUI. Run `strongcode init` in whichever project folder you want the harness to manage; it creates that project's `strongcode.config.yaml`.
-
-## Quick Start
-
-```sh
-npm run build
-strongcode init
-strongcode config validate --config strongcode.config.yaml
-strongcode tools list --config strongcode.config.yaml
-strongcode run "hello" --config strongcode.config.yaml --session demo
-strongcode session show demo --config strongcode.config.yaml
-```
-
-The mock provider works without external credentials.
+Running `strongcode` with no arguments opens the interactive TUI.
 
 ## Configuration
 
-See `strongcode.config.example.yaml`:
+Start from `strongcode.config.example.yaml`:
 
 ```yaml
 version: 1
@@ -107,6 +159,7 @@ models:
   mock:
     provider: mock
     model: mock
+    enabled: true
 permissions:
   tools:
     list_files: allow
@@ -115,9 +168,38 @@ permissions:
 
 Permissions are `allow`, `ask`, or `deny`. Unknown tools are denied. `ask` is denied non-interactively in this MVP.
 
+Do not put secrets directly in config. Config fields such as `apiKey`, `token`, `accessToken`, `refreshToken`, `idToken`, `clientSecret`, `secret`, `authorization`, or `bearerToken` are rejected. Use environment variable names such as `OPENAI_API_KEY` or provider credentials stored through `/connect`.
+
+StrongCode also reads an editable model catalog from `.strongcode/models.json`. This file is for provider/model metadata only; do not put API keys in it. Catalog entries can add display names and models, but credential-routing fields such as API key environment variables and base URLs must come from built-in provider defaults, `strongcode.config.yaml`, or `/connect`. It accepts an OpenCode-style provider-centric shape:
+
+```json
+{
+  "providers": {
+    "openai": {
+      "name": "GPT / OpenAI",
+      "env": ["OPENAI_API_KEY"],
+      "api": "https://api.openai.com/v1",
+      "models": {
+        "gpt-4.1": { "name": "GPT-4.1", "id": "gpt-4.1" }
+      }
+    },
+    "kimi": {
+      "name": "Kimi",
+      "env": ["MOONSHOT_API_KEY"],
+      "api": "https://api.moonshot.ai/v1",
+      "models": {
+        "kimi-k2": { "name": "Kimi K2", "id": "kimi-k2" }
+      }
+    }
+  }
+}
+```
+
+Models from this catalog are merged with `strongcode.config.yaml` at startup, so `/model` and `/models` show them alongside configured or discovered models.
+
 ## Providers
 
-Use `/connect` inside the TUI to connect provider credentials. Use `/provider` to inspect provider status and `/provider ...` for provider subcommands. The built-in order is GPT / OpenAI, Kimi, Claude, Grok, Mock, then Custom Provider.
+Use `/connect` inside the TUI to connect provider credentials. Use `/model` to inspect the active provider's configured models.
 
 ```text
 /connect
@@ -125,38 +207,33 @@ Use `/connect` inside the TUI to connect provider credentials. Use `/provider` t
 /connect openai chatgpt-browser
 /connect openai chatgpt-headless
 /connect remove <provider-id>
-/provider
-/provider list
-/provider select openai
-/provider models custom
-/provider configure custom http://localhost:11434/v1 LOCAL_MODEL_API_KEY
-/provider enable model <model-id>
-/provider disable model <model-id>
-/models
-/model <model-id>
+/model
 ```
 
-Provider config stores env var names such as `OPENAI_API_KEY`, not API keys. `/connect <provider-id> <api-key>` stores API credentials in `.strongcode/auth.json` with restrictive file permissions where the platform supports them. `/connect openai chatgpt-browser` starts ChatGPT account OAuth in a browser, and `/connect openai chatgpt-headless` starts the device-code flow. OpenAI-compatible discovery uses a `GET <baseUrl>/models` response and adds discovered models disabled by default so you can enable the ones you want.
+`/connect <provider-id> <api-key>` stores credentials in `.strongcode/auth.json` with restrictive file permissions where the platform supports them. OpenAI-compatible discovery calls `GET <baseUrl>/models` and adds discovered models disabled by default so you can enable the ones you want.
 
-Do not put `apiKey`, `token`, `accessToken`, `refreshToken`, `idToken`, `clientSecret`, `secret`, `authorization`, or `bearerToken` fields in config. The loader rejects those fields at provider and model config levels. Providers of type `openai` or `openai-compatible` use `apiKeyEnv` or `.strongcode/auth.json` credentials at discovery/completion time. API-key completions send non-streaming chat completions to `<baseUrl>/chat/completions`; OpenAI ChatGPT account OAuth completions use the ChatGPT Codex endpoint.
+Runtime completions are supported for `mock`, `openai`, and `openai-compatible` providers. Catalog-only providers can appear in the UI before a runtime client is implemented.
 
-Fully supported runtime providers are `mock`, `openai`, and `openai-compatible`. Catalog-visible providers such as `anthropic` are listed for connection/status but remain unsupported for completions until a backend client is added.
+## Built-In Tools
 
-## Sessions
+StrongCode currently includes read-only workspace tools:
 
-Sessions are JSONL files under the configured data directory, defaulting to `.strongcode/sessions/<session-id>.jsonl`.
-
-## Tools
-
-Built-in tools are read-only:
-
-- `list_files`: list direct children of a directory inside the configured workspace.
-- `read_file`: read a UTF-8 text file inside the configured workspace.
+- `list_files`: lists direct children of a directory inside the configured workspace.
+- `read_file`: reads a UTF-8 text file inside the configured workspace.
 
 Both tools resolve paths against the configured workspace and reject traversal outside it.
 
+## Sessions
+
+Sessions are JSONL files under the configured data directory. By default, they are stored at:
+
+```text
+.strongcode/sessions/<session-id>.jsonl
+```
+
 ## Development
 
+Run the main checks with:
 
 ```sh
 npm test

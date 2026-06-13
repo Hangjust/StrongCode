@@ -27,7 +27,8 @@ export function createSolidShellDescriptor(state: TuiState, route: TuiRoute, ser
     children: [
       { type: "text", props: { fg: services.config.theme.primary }, children: ["StrongCode Solid shell"] },
       { type: "text", props: { fg: services.config.theme.text }, children: [`Route ${route.name}`] },
-      { type: "text", props: { fg: services.config.theme.muted }, children: [`Model ${state.model ?? "mock"}`] },
+      { type: "text", props: { fg: services.config.theme.muted }, children: [`Active model ${state.modelDisplayName ?? state.model ?? "mock"}`] },
+      { type: "text", props: { fg: services.config.theme.muted }, children: [`Provider ${state.providerDisplayName ?? state.provider}`] },
       { type: "text", props: { fg: services.config.theme.muted }, children: [services.plugins.render("status")] }
     ]
   };

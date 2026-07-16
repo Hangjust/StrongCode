@@ -1,8 +1,17 @@
 import { StrongCodeError } from "../core/errors";
 import { isSecretLikeConfigKey } from "../config/security";
 
-function isLocalhost(hostname: string): boolean {
+export function isLocalhost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+}
+
+export function isLocalProviderBaseUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return isLocalhost(parseProviderBaseUrl(value, "local provider").hostname);
+  } catch {
+    return false;
+  }
 }
 
 function rejectSecretQuery(searchParams: URLSearchParams, fieldName: string): void {
@@ -61,6 +70,10 @@ export function validateProviderModelsEndpoint(endpoint: string | undefined): st
 
   if (value.includes("?")) {
     throw new StrongCodeError("CONFIG_ERROR", "Provider modelsEndpoint must not include a query string");
+  }
+
+  if (value.split("/").some(segment => segment === "." || segment === "..")) {
+    throw new StrongCodeError("CONFIG_ERROR", "Provider modelsEndpoint must not contain dot path segments");
   }
 
   return value;

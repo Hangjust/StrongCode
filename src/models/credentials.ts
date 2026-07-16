@@ -1,8 +1,9 @@
 import { StrongCodeError } from "../core/errors";
-import type { OAuthProviderAuth, ProviderAuthReader } from "./auth-store";
-import { refreshChatGptAccessToken } from "./chatgpt-oauth";
+import type { ProviderAuthReader } from "./auth-store";
+import { allowsCredentiallessLocalProvider } from "./registry";
+import { parseProviderBaseUrl } from "./provider-url";
 
-export type ProviderCredentials = ApiKeyProviderCredentials | OAuthProviderCredentials;
+export type ProviderCredentials = ApiKeyProviderCredentials | NoAuthProviderCredentials;
 
 export interface ApiKeyProviderCredentials {
   type: "api";
@@ -10,76 +11,65 @@ export interface ApiKeyProviderCredentials {
   secret: string;
 }
 
-export interface OAuthProviderCredentials {
-  type: "oauth";
-  access: string;
-  refresh?: string;
-  expires?: number;
-  accountId?: string;
-  secret: string;
+export interface NoAuthProviderCredentials {
+  type: "none";
+  secret: "";
 }
 
 export interface ResolveProviderCredentialsOptions {
   authStore?: ProviderAuthReader;
+  /** Ambient API-key environment variables are only safe with a trusted provider configuration. */
+  allowEnvironmentCredentials?: boolean;
 }
 
-interface ProviderAuthWriter extends ProviderAuthReader {
-  set(providerId: string, auth: OAuthProviderAuth): Promise<void>;
+function normalizedBaseUrl(value: string): string {
+  return parseProviderBaseUrl(value, "credential binding").toString().replace(/\/$/, "");
 }
 
-const refreshPromises = new Map<string, Promise<OAuthProviderAuth>>();
-
-function canWriteAuth(authStore: ProviderAuthReader | undefined): authStore is ProviderAuthWriter {
-  return Boolean(authStore && "set" in authStore && typeof authStore.set === "function");
-}
-
-function oauthSupported(providerId: string): boolean {
-  return providerId === "openai";
-}
-
-async function refreshOAuth(providerId: string, auth: OAuthProviderAuth, authStore: ProviderAuthReader | undefined): Promise<OAuthProviderAuth> {
-  if (!auth.refresh) throw new StrongCodeError("MODEL_ERROR", `Provider ${providerId} OAuth credentials are expired and missing a refresh token`);
-  const key = `${providerId}:${auth.refresh}`;
-  let refreshPromise = refreshPromises.get(key);
-  if (!refreshPromise) {
-    refreshPromise = refreshChatGptAccessToken(auth.refresh).then(refreshed => ({ ...refreshed, accountId: refreshed.accountId ?? auth.accountId }));
-    refreshPromises.set(key, refreshPromise);
-    refreshPromise.finally(() => refreshPromises.delete(key)).catch(error => { void error; });
-  }
-  const refreshed = await refreshPromise;
-  if (canWriteAuth(authStore)) await authStore.set(providerId, refreshed);
-  return refreshed;
-}
-
-function oauthCredentials(auth: OAuthProviderAuth): OAuthProviderCredentials {
-  return {
-    type: "oauth",
-    access: auth.access,
-    refresh: auth.refresh,
-    expires: auth.expires,
-    accountId: auth.accountId,
-    secret: auth.access
-  };
-}
-
-export async function resolveProviderCredentials(providerId: string, providerConfig: { apiKeyEnv?: string | undefined }, options: ResolveProviderCredentialsOptions = {}): Promise<ProviderCredentials> {
+export async function resolveProviderCredentials(providerId: string, providerConfig: { type?: string | undefined; apiKeyEnv?: string | undefined; baseUrl?: string | undefined; allowUnauthenticated?: boolean | undefined }, options: ResolveProviderCredentialsOptions = {}): Promise<ProviderCredentials> {
   const auth = await options.authStore?.get(providerId);
+  if (auth?.type === "oauth") {
+    throw new StrongCodeError("CONFIG_ERROR", `OAuth credentials are not valid for API provider ${providerId}; choose the ChatGPT browser or headless login instead`);
+  }
+  if (auth?.type === "api" && auth.metadata?.providerType && providerConfig.type && auth.metadata.providerType !== providerConfig.type) {
+    throw new StrongCodeError("CONFIG_ERROR", `Saved credentials for ${providerId} are bound to provider type ${auth.metadata.providerType}; reconfigure this provider before use`);
+  }
+  if (auth?.type === "api" && auth.metadata?.origin) {
+    if (!providerConfig.baseUrl || normalizedBaseUrl(auth.metadata.origin) !== normalizedBaseUrl(providerConfig.baseUrl)) {
+      throw new StrongCodeError("CONFIG_ERROR", `Saved credentials for ${providerId} are bound to a different endpoint; reconfigure this provider before use`);
+    }
+  }
+  if (
+    options.allowEnvironmentCredentials === false
+    && auth?.type === "api"
+    && (!auth.metadata?.providerType || (providerConfig.baseUrl && !auth.metadata.origin))
+  ) {
+    throw new StrongCodeError(
+      "CONFIG_ERROR",
+      `Saved credentials for ${providerId} are not bound to this project provider type and endpoint; reconnect the provider before use`
+    );
+  }
   if (!providerConfig.apiKeyEnv) {
     if (auth?.type === "api") return { type: "api", apiKey: auth.key, secret: auth.key };
-    if (auth?.type === "oauth" && oauthSupported(providerId)) {
-      const current = auth.expires !== undefined && auth.expires <= Date.now() ? await refreshOAuth(providerId, auth, options.authStore) : auth;
-      return oauthCredentials(current);
-    }
+    if (allowsCredentiallessLocalProvider(providerId, providerConfig)) return { type: "none", secret: "" };
     throw new StrongCodeError("CONFIG_ERROR", `Provider ${providerId} requires apiKeyEnv or auth.json credentials`);
   }
 
+  if (options.allowEnvironmentCredentials === false) {
+    if (auth?.type === "api") return { type: "api", apiKey: auth.key, secret: auth.key };
+    throw new StrongCodeError(
+      "MODEL_ERROR",
+      `Environment API keys are disabled for untrusted project provider ${providerId}; connect it to the project credential store or set STRONGCODE_TRUST_PROJECT_CONFIG=1`
+    );
+  }
+
+  // An explicitly connected credential is authoritative. Environment values
+  // remain a convenient fallback, but must not silently shadow a newer key
+  // saved by setup or `/connect` (for example, a stale user-level variable).
+  if (auth?.type === "api") return { type: "api", apiKey: auth.key, secret: auth.key };
+
   const apiKey = process.env[providerConfig.apiKeyEnv];
   if (!apiKey) {
-    if (auth?.type === "api") return { type: "api", apiKey: auth.key, secret: auth.key };
-    if (auth?.type === "oauth" && oauthSupported(providerId)) {
-      const current = auth.expires !== undefined && auth.expires <= Date.now() ? await refreshOAuth(providerId, auth, options.authStore) : auth;
-      return oauthCredentials(current);
-    }
     throw new StrongCodeError("MODEL_ERROR", `Missing API key env ${providerConfig.apiKeyEnv} for provider ${providerId}`);
   }
 

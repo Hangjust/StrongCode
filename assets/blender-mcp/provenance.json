@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/ahujasid/blender-mcp",
+    "commit": "6641189231caf3752302ae20591bc87fda85fc4e"
+  },
+  "artifacts": [
+    {
+      "kind": "wheel",
+      "name": "blender-mcp",
+      "version": "1.6.4",
+      "filename": "blender_mcp-1.6.4-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/17/0f/e6a51f58d8e6af9dbcb8a8e9f446a647809fab7ae727c9c4ffc4cef31328/blender_mcp-1.6.4-py3-none-any.whl",
+      "size": 26431,
+      "sha256": "2e935cc3f78df5d2be12192b970f92753a00b3a50c442b6338c3100102a133c5",
+      "metadataUrl": "https://pypi.org/pypi/blender-mcp/1.6.4/json"
+    },
+    {
+      "kind": "addon",
+      "filename": "addon.py",
+      "commit": "6641189231caf3752302ae20591bc87fda85fc4e",
+      "url": "https://raw.githubusercontent.com/ahujasid/blender-mcp/6641189231caf3752302ae20591bc87fda85fc4e/addon.py",
+      "size": 118487,
+      "sha256": "bba60831f5f89a74deda0294b131668a086cf46eb35a6a01abbd0d21d9e92630"
+    }
+  ],
+  "license": {
+    "path": "LICENSE",
+    "spdx": "MIT",
+    "sourceUrl": "https://raw.githubusercontent.com/ahujasid/blender-mcp/6641189231caf3752302ae20591bc87fda85fc4e/LICENSE",
+    "sha256": "048c8f0b94adbf94c455349754f3b460aa1248e3ad1b4fe5794fdbe18b60ef44",
+    "sourceSha256": "049501fd54d27852507853a5b88094ca1c6ff97404418a5032f3310eecc9cde6",
+    "appliesTo": [
+      "blender_mcp-1.6.4-py3-none-any.whl",
+      "addon.py"
+    ]
+  },
+  "derivatives": [
+    {
+      "path": "addon/strongcode_blender_mcp/__init__.py",
+      "sha256": "360f05ac0c591ed3b7decac5d4292555e1a747bb252d49b4bb9a3275c5cf4e9e",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/channel.py",
+      "sha256": "20d89ad9c06147bdc09fa4d602b946028507900ef635733cee8f3216e68c8d07",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/operations.py",
+      "sha256": "20b17508efa644d975c10392a4b5a48e1c8311ba148441cc48e7b0d084577a87",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/pending.py",
+      "sha256": "da5a645d9bcda89e70ba47bcab4dd01589075e24ce293b519430480c0177db4b",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/profile.py",
+      "sha256": "c6de3ebaf178fe3748d9d06aa0d54532dc4cb173417b73c98f0c98874d20d920",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/protocol.py",
+      "sha256": "91206941a2b64739f87dcfe1d6c812eb8bb5e4f3d497e1b84366eea60f78fb8e",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "addon/strongcode_blender_mcp/runtime.py",
+      "sha256": "3107ee1bafe7e83599d63e8ba201de8cbb166cc07f424db0557efaef08c5c7af",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/strongcode-blender-wrapper.py",
+      "sha256": "1ef42cd70def7928d0cbdbfdfab603684c78d55d669cc2ad1e645ed2a3d18aab",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/wrapper/__init__.py",
+      "sha256": "d4a1040ff746b190ccde665180ba668f25ad304bf8f8ba32e3c010cccb8e1920",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/wrapper/channel.py",
+      "sha256": "20d89ad9c06147bdc09fa4d602b946028507900ef635733cee8f3216e68c8d07",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/wrapper/client.py",
+      "sha256": "224c9e31da21cd7ab1055e93ac20a909b7df10873debd6853b4f643454d5eed6",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/wrapper/protocol.py",
+      "sha256": "91206941a2b64739f87dcfe1d6c812eb8bb5e4f3d497e1b84366eea60f78fb8e",
+      "licensePath": "LICENSE"
+    },
+    {
+      "path": "runtime-wrapper/wrapper/server.py",
+      "sha256": "fde430398dadec83abc3a61fbf4479df10aea48956d6a167ee8ce2699cd66922",
+      "licensePath": "LICENSE"
+    }
+  ]
+}

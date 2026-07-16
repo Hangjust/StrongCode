@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { mockProviderDefaults } from "../models/registry";
 import { isSecretLikeConfigKey, looksLikeProviderApiKeyEnv } from "./security";
-import { parseProviderBaseUrl, validateProviderModelsEndpoint } from "../models/provider-url";
+import { isLocalProviderBaseUrl, parseProviderBaseUrl, validateProviderModelsEndpoint } from "../models/provider-url";
+import { preflightConfigSchema } from "../agents/preflight/config";
+import { categoryOverridesSchema, delegationConfigSchema, helperOverridesSchema, validateRuntimeModelReferences } from "./runtime-config";
+import { toolPatternSchema } from "../tools/pattern";
 
 function validateProviderBaseUrl(value: string | undefined, context: z.RefinementCtx): void {
   if (!value) return;
@@ -57,7 +60,14 @@ export const permissionDecisionSchema = z.enum(["allow", "ask", "deny"]);
 
 export const agentConfigSchema = z.object({
   model: z.string().min(1),
-  tools: z.array(z.string().min(1)).default([])
+  tools: z.array(toolPatternSchema).default([]),
+  displayName: z.string().min(1).optional(),
+  description: z.string().min(1).optional(),
+  mode: z.enum(["primary", "specialist", "subagent"]).optional(),
+  systemPrompt: z.string().min(1).optional(),
+  fallbackModels: z.array(z.string().min(1)).optional(),
+  skills: z.array(z.string().min(1)).optional(),
+  hidden: z.boolean().optional()
 });
 
 const providerConfigBaseSchema = z.object({
@@ -66,13 +76,35 @@ const providerConfigBaseSchema = z.object({
   apiKeyEnv: z.string().regex(/^[A-Z_][A-Z0-9_]*_API_KEY$/, "Use an API-key environment variable name such as OPENAI_API_KEY").optional(),
   baseUrl: z.string().min(1).optional(),
   modelsEndpoint: z.string().startsWith("/").optional(),
+  allowUnauthenticated: z.boolean().optional(),
+  projectId: z.string().regex(/^[A-Za-z0-9._-]+$/).optional(),
+  location: z.string().regex(/^[A-Za-z0-9._-]+$/).optional(),
   enabled: z.boolean().optional()
 }).passthrough();
+
+interface ProviderConfigValue {
+  type: string;
+  displayName: string;
+  apiKeyEnv?: string;
+  baseUrl?: string;
+  modelsEndpoint?: string;
+  allowUnauthenticated?: boolean;
+  projectId?: string;
+  location?: string;
+  enabled?: boolean;
+}
 
 export const providerConfigSchema = providerConfigBaseSchema.superRefine((provider, context) => {
   rejectSecretLikeKeys(provider, context);
   validateProviderBaseUrl(provider.baseUrl, context);
   validateModelsEndpoint(provider.modelsEndpoint, context);
+  if (provider.allowUnauthenticated && !isLocalProviderBaseUrl(provider.baseUrl)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["allowUnauthenticated"],
+      message: "Unauthenticated providers are allowed only on localhost"
+    });
+  }
   if (provider.apiKeyEnv && !looksLikeProviderApiKeyEnv(provider.apiKeyEnv)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -80,14 +112,31 @@ export const providerConfigSchema = providerConfigBaseSchema.superRefine((provid
       message: "Use an API-key environment variable name such as OPENAI_API_KEY"
     });
   }
-}).transform(provider => ({
+}).transform((provider): ProviderConfigValue => ({
   type: provider.type,
   displayName: provider.displayName,
   apiKeyEnv: provider.apiKeyEnv,
   baseUrl: provider.baseUrl,
   modelsEndpoint: provider.modelsEndpoint,
+  allowUnauthenticated: provider.allowUnauthenticated,
+  projectId: provider.projectId,
+  location: provider.location,
   enabled: provider.enabled
 }));
+
+const modelPricingSchema = z.object({
+  version: z.string().min(1),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  inputPerMillion: z.number().nonnegative().finite().optional(),
+  outputPerMillion: z.number().nonnegative().finite().optional(),
+  cacheReadPerMillion: z.number().nonnegative().finite().optional(),
+  cacheWritePerMillion: z.number().nonnegative().finite().optional()
+}).strict().superRefine((pricing, context) => {
+  if ([pricing.inputPerMillion, pricing.outputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion]
+    .every(rate => rate === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Pricing must include at least one rate" });
+  }
+});
 
 const modelConfigBaseSchema = z.object({
   provider: z.string().min(1),
@@ -95,18 +144,33 @@ const modelConfigBaseSchema = z.object({
   displayName: z.string().min(1).optional(),
   enabled: z.boolean().optional(),
   source: z.string().min(1).optional(),
-  options: z.record(z.unknown()).optional()
+  options: z.record(z.unknown()).optional(),
+  contextWindowTokens: z.number().int().positive().safe().optional(),
+  pricing: modelPricingSchema.optional()
 }).passthrough();
+
+interface ModelConfigValue {
+  provider: string;
+  model?: string;
+  displayName?: string;
+  enabled?: boolean;
+  source?: string;
+  options?: Record<string, unknown>;
+  contextWindowTokens?: number;
+  pricing?: z.infer<typeof modelPricingSchema>;
+}
 
 export const modelConfigSchema = modelConfigBaseSchema.superRefine((model, context) => {
   rejectSecretLikeKeys(model, context);
-}).transform(model => ({
+}).transform((model): ModelConfigValue => ({
   provider: model.provider,
   model: model.model,
   displayName: model.displayName,
   enabled: model.enabled,
   source: model.source,
-  options: model.options
+  options: model.options,
+  contextWindowTokens: model.contextWindowTokens,
+  pricing: model.pricing
 }));
 
 export const strongCodeConfigSchema = z.object({
@@ -117,6 +181,10 @@ export const strongCodeConfigSchema = z.object({
   providers: z.record(providerConfigSchema).optional(),
   agents: z.record(agentConfigSchema),
   models: z.record(modelConfigSchema),
+  preflight: preflightConfigSchema.optional(),
+  helpers: helperOverridesSchema,
+  delegation: delegationConfigSchema,
+  categories: categoryOverridesSchema,
   permissions: z.object({
     tools: z.record(permissionDecisionSchema).default({})
   }).default({ tools: {} })
@@ -139,6 +207,16 @@ export const strongCodeConfigSchema = z.object({
         message: `Model '${agent.model}' is not defined`
       });
     }
+
+    (agent.fallbackModels ?? []).forEach((modelName, index) => {
+      if (!Object.hasOwn(config.models, modelName)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["agents", agentName, "fallbackModels", index],
+          message: `Fallback model '${modelName}' is not defined`
+        });
+      }
+    });
   }
 
   for (const [modelName, model] of Object.entries(config.models)) {
@@ -147,6 +225,28 @@ export const strongCodeConfigSchema = z.object({
         code: z.ZodIssueCode.custom,
         path: ["models", modelName, "provider"],
         message: `Provider '${model.provider}' is not defined`
+      });
+    }
+  }
+
+  validateRuntimeModelReferences(config, context);
+
+  if (config.preflight) {
+    const routes = [
+      ["summary", config.preflight.summary],
+      ["analysis", config.preflight.analysis],
+      ["explorer", config.preflight.explorer]
+    ] as const;
+    for (const [role, route] of routes) {
+      if (!route) continue;
+      [route.model, ...route.fallbackModels].forEach((modelName, index) => {
+        if (!Object.hasOwn(config.models, modelName)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["preflight", role, index === 0 ? "model" : "fallbackModels", index === 0 ? undefined : index - 1].filter(value => value !== undefined),
+            message: `Preflight ${role} model '${modelName}' is not defined`
+          });
+        }
       });
     }
   }
@@ -159,4 +259,6 @@ export type PermissionDecision = z.infer<typeof permissionDecisionSchema>;
 export type AgentConfig = z.infer<typeof agentConfigSchema>;
 export type ProviderConfig = z.infer<typeof providerConfigSchema>;
 export type ModelConfig = z.infer<typeof modelConfigSchema>;
-export type StrongCodeConfig = z.infer<typeof strongCodeConfigSchema>;
+type ParsedStrongCodeConfig = z.infer<typeof strongCodeConfigSchema>;
+export type StrongCodeConfig = Omit<ParsedStrongCodeConfig, "helpers" | "delegation" | "categories"> &
+  Partial<Pick<ParsedStrongCodeConfig, "helpers" | "delegation" | "categories">>;

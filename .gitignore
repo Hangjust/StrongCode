@@ -13,8 +13,17 @@ Harness Ideas.md
 harness ideas.md
 strongcode.config.yaml
 CompletionSound.m4a
+provider-opencode-plan.md
 .vscode/
 .idea/
 *.swp
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
+
+# Local harness & tool state
+.omo/
+.ruff_cache/
+.codegraph
+sleep/

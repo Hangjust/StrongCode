@@ -1,23 +1,35 @@
 import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { Agent } from "../agents/agent";
 import { AgentRunner } from "../agents/runner";
-import { DEFAULT_CONFIG_PATH } from "../config/load";
+import type { ApprovedPlan, PlanReceipt } from "../agents/plan-handoff";
+import { cyclePrimaryAgent, getAgentDefinition, getAgentDisplayName, listAgentDefinitions } from "../agents/registry";
+import { DEFAULT_CONFIG_PATH, loadConfig, resolveConfigPath } from "../config/load";
+import { resolveStrongCodeHome } from "../config/paths";
 import { persistConfigUpdate, selectModel } from "../config/save";
 import { StrongCodeConfig } from "../config/schema";
+import { StrongCodeError } from "../core/errors";
 import { orderedProviders } from "../models/registry";
-import { ProviderAuth, ProviderAuthStore } from "../models/auth-store";
+import { createRuntimeAuthReader, ProviderAuth, ProviderAuthStore, resolveRuntimeAuthDataDir } from "../models/auth-store";
 import { createProviderCatalog } from "../models/catalog";
-import { buildModelsUrl, discoverOpenAICompatibleModels, globalFetchTransport } from "../models/discovery";
+import { buildModelsUrl, discoverOpenAICompatibleModels, discoverProviderModels, globalFetchTransport } from "../models/discovery";
 import { ProviderAuthMethodDetail, ProviderService } from "../models/provider-service";
+import { isLocalProviderBaseUrl } from "../models/provider-url";
 import { requireRuntime, createAgent } from "../runtime/factory";
 import { SessionStore } from "../sessions/session-store";
-import { createDefaultToolRegistry } from "../tools/registry";
-import { TuiState, sanitizeDisplayValue } from "./render";
+import { createRuntimeToolRegistry } from "../mcp/runtime-registry";
+import { TuiState, TuiTranscriptMessage, sanitizeDisplayValue, sanitizeMultilineDisplayValue } from "./render";
 import { clipDisplayLine, renderAllModelList, renderHomeWithPrompt, renderSessionLayout } from "./render";
 import { handleConnectCommand } from "./commands";
+import { prepareDelegatedSpawn, resolveDelegatedExecutable } from "../models/delegated-executable";
 import { loadTuiConfig, TuiConfig } from "./config/tui";
+import type { QuestionBroker } from "../questions/broker";
+import type { DeepSeekQuestionSimplifier } from "../questions/simplifier";
+import { mountQuestionSurface, type QuestionSurfaceController } from "./question/surface";
+import { installQuestionRuntime } from "./question/runtime";
 import { describeKeybinds, TuiKeybindCommand } from "./config/keybind";
 import { createDefaultPalette } from "./ui/palette";
 import { DialogManager } from "./ui/dialog";
@@ -29,6 +41,43 @@ import { renderDialogOverlay, renderPaletteOverlay, renderSlashCommandOverlay } 
 import { renderApprovalSurface, renderDiffSurface, renderEditorPasteSurface, renderPickerSurface, renderSidebarPanel, renderStatusDashboard, renderThemePicker } from "./ui/surfaces";
 import { createSolidShellDescriptor, SolidShellNode } from "./solid/shell";
 import { writeClipboard } from "./util/clipboard";
+import {
+  STRONGCODE_WORDMARK,
+  STRONGCODE_WORDMARK_GAP,
+  STRONGCODE_WORDMARK_HEIGHT,
+  STRONGCODE_WORDMARK_LEFT_WIDTH,
+  STRONGCODE_WORDMARK_MIN_VIEWPORT,
+  STRONGCODE_WORDMARK_RIGHT_WIDTH,
+  STRONGCODE_WORDMARK_WIDTH,
+  decodeWordmarkLine
+} from "./ui/wordmark";
+import {
+  ModelUiControls,
+  SessionTelemetry,
+  STRONGCODE_VERSION,
+  TurnReceipt,
+  commandHelpLines,
+  compactSessionTitle,
+  fastModeLabel,
+  formatCost,
+  formatTokens,
+  modelUiControls,
+  promptHeightForVisualLines,
+  reasoningLabel,
+  sessionTelemetryLine,
+  shouldFollowLatestPosition,
+  shouldSyncSlashOverlay,
+  turnReceiptLine,
+  turnStatusIcon
+} from "./ui/session-chrome";
+import { projectSessionTelemetry, summaryDetailLines, summaryRailLines } from "./ui/session-summary";
+import {
+  fullTuiRouteForInput,
+  parseSlashCommand,
+  resolveSlashSubmission,
+  slashCommandAllowedDuringTurn,
+  slashCommandAvailability
+} from "./slash-command-registry";
 
 type OpenTuiCore = typeof import("@opentui/core");
 type OpenTuiRenderer = InstanceType<OpenTuiCore["CliRenderer"]>;
@@ -38,9 +87,10 @@ type OpenTuiText = InstanceType<OpenTuiCore["TextRenderable"]>;
 type OpenTuiInput = InstanceType<OpenTuiCore["InputRenderable"]>;
 type OpenTuiTextarea = InstanceType<OpenTuiCore["TextareaRenderable"]>;
 type OpenTuiScrollBox = InstanceType<OpenTuiCore["ScrollBoxRenderable"]>;
+type OpenTuiRenderable = NonNullable<OpenTuiRenderer["currentFocusedRenderable"]>;
 type OpenTuiDialogFocus = OpenTuiBox | OpenTuiInput | OpenTuiTextarea;
 type OpenTuiKeymap = {
-  registerLayer(layer: { priority?: number; bindings?: unknown[]; commands?: unknown[] }): () => void;
+  registerLayer(layer: { priority?: number; bindings?: readonly unknown[]; commands?: readonly unknown[] }): () => void;
 };
 type OpenTuiKeymapModule = {
   createDefaultOpenTuiKeymap(renderer: OpenTuiRenderer): OpenTuiKeymap;
@@ -70,56 +120,206 @@ const COLORS = {
   muted: "#9a9184"
 };
 
-const LOGO = [
-  ["██████", "██████", "█████ ", "██████", "██  ██", "██████", "██████", "██████", "█████ ", "██████"].join(" "),
-  ["██    ", "  ██  ", "██  ██", "██  ██", "███ ██", "██    ", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["█████ ", "  ██  ", "█████ ", "██  ██", "██████", "██ ███", "██    ", "██  ██", "██  ██", "█████ "].join(" "),
-  ["   ██ ", "  ██  ", "██ ██ ", "██  ██", "██ ███", "██  ██", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["██ ██ ", "  ██  ", "██  ██", "██  ██", "██  ██", "██  ██", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["██████", "  ██  ", "██  ██", "██████", "██  ██", "██████", "██████", "██████", "█████ ", "██████"].join(" ")
-];
-const LOGO_WIDTH = Math.max(...LOGO.map(line => line.length));
+const REASONING_DISCLOSURE_ID_PREFIX = "assistant-reasoning-disclosure-";
+let reasoningDisclosureCount = 0;
+
 const SLASH_COMMAND_LIMIT = 10;
-const HOME_PROMPT_WIDTH = LOGO_WIDTH;
+const HOME_PROMPT_WIDTH = 72;
+export const ACTIVE_TURN_BUSY_MESSAGE = "The active agent is still working. Wait for this turn to finish before sending another message.";
+export const START_WORK_HANDOFF_PROMPT = "StrongCode /start-work handoff: Execute the latest approved JBP plan in this session now. Begin with its first unblocked task and continue through its verification gates.";
+
+export type ExclusiveOperationLease = object;
+
+export interface ExclusiveOperationGate {
+  acquire(): ExclusiveOperationLease | undefined;
+  release(lease: ExclusiveOperationLease): void;
+  isActive(): boolean;
+}
+
+export type ContextCompactionRunner = Pick<AgentRunner, "compact">;
+
+export function createExclusiveOperationGate(): ExclusiveOperationGate {
+  let owner: ExclusiveOperationLease | undefined;
+  return {
+    acquire() {
+      if (owner) return undefined;
+      const lease = {};
+      owner = lease;
+      return lease;
+    },
+    release(lease) {
+      if (owner === lease) owner = undefined;
+    },
+    isActive() {
+      return owner !== undefined;
+    }
+  };
+}
+
+export function acquireTurnLease(turns: ExclusiveOperationGate, mutations: ExclusiveOperationGate, turnRunning: boolean): ExclusiveOperationLease | undefined {
+  if (turnRunning || mutations.isActive()) return undefined;
+  return turns.acquire();
+}
+
+export function releaseOperationAndSubmit<T>(gate: ExclusiveOperationGate, lease: ExclusiveOperationLease, submit: () => T): T {
+  gate.release(lease);
+  return submit();
+}
+
+export type ModelRefreshToken = object;
+
+export interface ModelRefreshGate {
+  begin(): ModelRefreshToken;
+  invalidate(): void;
+  isCurrent(token: ModelRefreshToken, overlay: string): boolean;
+}
+
+export function createModelRefreshGate(): ModelRefreshGate {
+  let current: ModelRefreshToken | undefined;
+  return {
+    begin() {
+      const token = {};
+      current = token;
+      return token;
+    },
+    invalidate() {
+      current = undefined;
+    },
+    isCurrent(token, overlay) {
+      return current === token && overlay === "models";
+    }
+  };
+}
+
+export function requireIdleTurn(turnRunning: boolean, onBusy: (message: string) => void): boolean {
+  if (!turnRunning) return true;
+  onBusy(ACTIVE_TURN_BUSY_MESSAGE);
+  return false;
+}
+
+export async function compactActiveContext(
+  runner: ContextCompactionRunner | undefined,
+  agent: Agent | undefined,
+  sessionId: string | undefined,
+  append: (role: "system", text: string) => void | Promise<void>
+): Promise<void> {
+  if (!runner || !agent || !sessionId) {
+    await append("system", "Unable to compact context: active runner, agent, or session is unavailable.");
+    return;
+  }
+  await append("system", "Compacting active context...");
+  try {
+    const result = await runner.compact(agent, sessionId);
+    if (!result.ok) {
+      await append("system", clipDisplayLine(`Unable to compact context: ${result.error.message}`));
+      return;
+    }
+    await append("system", clipDisplayLine(`Context compacted. Retained user items: ${result.value.retainedUserItemCount}.`));
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Compaction failed";
+    await append("system", clipDisplayLine(`Unable to compact context: ${detail}`));
+  }
+}
+
+export function snapshotTurnReceiptLabels(state: TuiState): { readonly agent: string; readonly model: string } {
+  return {
+    agent: sanitizeDisplayValue(state.defaultAgent, "default"),
+    model: sanitizeDisplayValue(state.modelDisplayName ?? state.model, "mock")
+  };
+}
+
+export function approvedPlanExecutionForActivation(agentName: string, explicitPlanApproval: boolean): boolean {
+  return explicitPlanApproval && getAgentDefinition(agentName)?.id === "bob-the-builder";
+}
 
 function shouldUseOpenTui(input: NodeJS.ReadableStream, output: NodeJS.WritableStream): boolean {
   return input === process.stdin && output === process.stdout && process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
+export function fallbackCommandContainsApiKey(input: string): boolean {
+  const command = parseSlashCommand(input);
+  if (command?.command !== "connect") return false;
+  const parts = command.rawArgs.split(/\s+/);
+  return parts.length >= 2 && parts[0]?.toLowerCase() !== "remove";
+}
+
 async function runFallbackTui(input: NodeJS.ReadableStream, output: NodeJS.WritableStream): Promise<void> {
   const readline = await import("node:readline");
-  const configPath = DEFAULT_CONFIG_PATH;
+  const configPath = resolveConfigPath();
   const configExists = existsSync(configPath);
   const state: TuiState = { provider: "N/A", defaultAgent: "N/A", configPath, configMissing: !configExists };
   let runner: AgentRunner | undefined;
   let agent: Agent | undefined;
   let config: StrongCodeConfig | undefined;
-  const messages: string[] = [];
+  let systemPrompt: string | undefined;
+  let trustedConfig = false;
+  let workspaceRoot: string | undefined;
+  let sessionStore: SessionStore | undefined;
+  const messages: TuiTranscriptMessage[] = [];
+  const sessionId = `session-${Date.now()}`;
 
   if (configExists) {
     try {
-      const runtime = await requireRuntime(configPath);
+      const runtime = await requireRuntime();
       config = runtime.config;
-      const agentName = runtime.config.defaultAgent;
-      const agentConfig = runtime.config.agents[agentName];
-      const modelConfig = runtime.config.models[agentConfig.model];
+      systemPrompt = runtime.systemPrompt;
+      trustedConfig = runtime.trustedConfig;
+      workspaceRoot = runtime.context.workspaceRoot;
+      const authStore = createRuntimeAuthReader(runtime.authDataDir, undefined, { allowEnvironmentContent: runtime.trustedConfig });
+      agent = createAgent(runtime.config, runtime.config.defaultAgent, {
+        authStore,
+        systemPrompt: runtime.systemPrompt,
+        allowEnvironmentCredentials: runtime.trustedConfig,
+        allowConfiguredSystemPrompt: runtime.trustedConfig,
+        restrictToReadOnlyTools: !runtime.trustedConfig,
+        workspaceRoot: runtime.context.workspaceRoot
+      });
+      const modelConfig = runtime.config.models[agent.config.model];
       state.provider = modelConfig.provider;
       state.providerDisplayName = runtime.config.providers[modelConfig.provider]?.displayName;
-      state.model = agentConfig.model;
+      state.model = agent.config.model;
       state.modelDisplayName = modelConfig.displayName;
-      state.defaultAgent = agentName;
+      state.modelOptions = modelConfig.options;
+      state.defaultAgent = agent.displayName ?? agent.name;
+      state.agentIdentity = agent.name;
       state.workspace = runtime.config.workspace;
       state.dataDir = runtime.config.dataDir;
-      agent = createAgent(runtime.config, runtime.config.defaultAgent, { authStore: new ProviderAuthStore(runtime.context.dataDir) });
-      runner = new AgentRunner(runtime.context, new SessionStore(runtime.context.dataDir), createDefaultToolRegistry());
+      sessionStore = new SessionStore(runtime.context.dataDir);
+      const registry = await createRuntimeToolRegistry(runtime.context, { allowMcp: runtime.trustedConfig });
+      runner = runtime.runnerFactory.create({
+        sessions: sessionStore,
+        tools: registry,
+        providerOptions: {
+          authStore,
+          allowEnvironmentCredentials: runtime.trustedConfig,
+          workspaceRoot: runtime.context.workspaceRoot
+        }
+      });
     } catch (error) {
       output.write(`${clipDisplayLine(`Error loading config: ${error instanceof Error ? error.message : String(error)}`)}\n`);
     }
   }
 
-  const services = await createTuiServices(await loadTuiConfig(), state.dataDir);
+  const servicesDataDir = config
+    ? resolveRuntimeAuthDataDir(
+      state.configPath,
+      path.resolve(path.dirname(path.resolve(state.configPath)), config.dataDir)
+    )
+    : undefined;
+  const services = await createTuiServices(await loadTuiConfig(), servicesDataDir, state, trustedConfig);
 
-  const fallbackRuntime: RuntimeState = { state, config, runner, agent };
+  const fallbackRuntime: RuntimeState = {
+    state,
+    config,
+    runner,
+    agent,
+    activeAgentId: agent?.name,
+    systemPrompt,
+    trustedConfig,
+    workspaceRoot,
+    sessionStore,
+    currentSessionId: sessionId
+  };
   output.write(`${renderHomeWithPrompt(state, true).output}\n`);
   await new Promise<void>(resolve => {
     const rl = readline.createInterface({ input, output, prompt: "" });
@@ -128,47 +328,92 @@ async function runFallbackTui(input: NodeJS.ReadableStream, output: NodeJS.Writa
       rl.close();
       resolve();
     };
+    const submitTurn = async (value: string, approvedPlan?: ApprovedPlan): Promise<void> => {
+      const turnRunner = fallbackRuntime.runner;
+      const turnAgent = fallbackRuntime.agent;
+      if (!turnRunner || !turnAgent) {
+        output.write("\nConfig missing. Run 'strongcode init' first.\n");
+        return;
+      }
+      const planningTurn = turnAgent.name === "jbp";
+      if (planningTurn) fallbackRuntime.jbpPlanReceipt = undefined;
+      services.history.add(value);
+      await services.historyStore?.save(services.history);
+      const startedAt = Date.now();
+      messages.push({ role: "user", text: value });
+      const result = approvedPlan
+        ? await turnRunner.runApprovedPlan(turnAgent, value, sessionId, approvedPlan)
+        : await turnRunner.run(turnAgent, value, sessionId);
+      if (planningTurn) fallbackRuntime.jbpPlanReceipt = result.ok ? result.value.planReceipt : undefined;
+      const receipt: TurnReceipt = {
+        status: result.ok ? "finished" : "failed",
+        agent: state.defaultAgent,
+        model: state.modelDisplayName ?? state.model ?? "mock",
+        durationMs: Date.now() - startedAt,
+        toolCalls: result.ok ? result.value.toolExecutions.length : 0,
+        skillsRead: undefined,
+        mcpServersUsed: undefined
+      };
+      services.telemetry.toolCalls += receipt.toolCalls;
+      services.lastReceipt = receipt;
+      messages.push({ role: "assistant", text: result.ok ? result.value.response : String(result.error), receipt });
+      output.write(`\n${renderSessionLayout(state, messages, true)}\n`);
+    };
+    services.submitTurn = submitTurn;
     rl.on("line", line => {
       const value = line.trim();
       pending = pending.then(async () => {
-        const runtime: RuntimeState = { state, config, runner, agent };
+        const runtime = fallbackRuntime;
         const append = (_role: "assistant" | "system", text: string) => {
           output.write(`\n${text}\n`);
         };
+        if (fallbackCommandContainsApiKey(value)) {
+          output.write("\nInline API keys are disabled in the fallback terminal.\nInput may be echoed; use the full TUI or run strongcode setup --force.\n");
+          return;
+        }
         if (await handleSystemCommand(value, runtime, services, append, close)) {
           config = runtime.config;
           agent = runtime.agent;
-      return;
+          return;
         }
-        if (value === "/connect" || value.startsWith("/connect ")) {
-          const response = await handleConnectCommand(value, { config, configPath, state, noColor: true, onConfigUpdated: updated => { refreshRuntimeFromConfig(runtime, updated); config = runtime.config; agent = runtime.agent; services.toasts.push("success", "Provider connected."); } });
-          output.write(`\n${response}\n`);
-        } else if (value.startsWith("/")) output.write(`\n${clipDisplayLine(`Unknown command: ${value}`)}\n`);
-        else if (value) {
-          services.history.add(value);
-          await services.historyStore?.save(services.history);
-          if (!runner || !agent) output.write("\nConfig missing. Run 'strongcode init' first.\n");
-          else {
-            const result = await runner.run(agent, value, `session-${Date.now()}`);
-            messages.push(`user: ${value}`);
-            messages.push(`assistant: ${result.ok ? result.value.response : String(result.error)}`);
-            output.write(`\n${renderSessionLayout(state, messages, true)}\n`);
-          }
-        }
+        if (value.startsWith("/")) output.write(`\n${clipDisplayLine(`Unknown command: ${value}`)}\n`);
+        else if (value) await submitTurn(value);
       }).catch(error => {
         output.write(`\n${clipDisplayLine(`Error: ${error instanceof Error ? error.message : String(error)}`)}\n`);
       });
     });
   });
+  await fallbackRuntime.runner?.close();
 }
 
 async function runThroughBun(): Promise<void> {
   const entry = require.main?.filename ?? __filename;
+  const projectCwd = process.cwd();
+  const bootstrapCwd = path.join(resolveStrongCodeHome(), "runtime", "bun-bootstrap");
+  await mkdir(bootstrapCwd, { recursive: true, mode: 0o700 });
+  const loaded = await loadConfig();
+  const configDirectory = loaded.ok ? loaded.value.directory : projectCwd;
+  const workspace = loaded.ok ? path.resolve(configDirectory, loaded.value.config.workspace) : projectCwd;
+  const resolvedCommand = await resolveDelegatedExecutable("bun", {
+    env: process.env,
+    cwd: bootstrapCwd,
+    // A shell opened in the user's home must not make normal user-installed
+    // runtimes (for example ~/.bun/bin) look repository-controlled. Exclude
+    // the actual config/project roots and the isolated bootstrap directory.
+    excludedRoots: [configDirectory, workspace, bootstrapCwd],
+    // Bun's documented per-user install root is pinned explicitly, so a broad
+    // home-directory workspace does not authorize arbitrary home executables.
+    allowedExecutableRoots: [path.join(os.homedir(), ".bun", "bin")]
+  });
+  const launch = prepareDelegatedSpawn(resolvedCommand, [entry]);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("bun", [entry], {
-      cwd: process.cwd(),
-      env: { ...process.env, STRONGCODE_TUI_BUN: "1" },
-      stdio: "inherit"
+    const child = spawn(launch.executable, launch.args, {
+      cwd: bootstrapCwd,
+      env: { ...launch.env, STRONGCODE_TUI_BUN: "1", STRONGCODE_TUI_PROJECT_CWD: projectCwd },
+      stdio: "inherit",
+      windowsHide: true,
+      shell: false,
+      windowsVerbatimArguments: launch.windowsVerbatimArguments
     });
     child.on("error", reject);
     child.on("exit", code => {
@@ -182,7 +427,16 @@ interface RuntimeState {
   state: TuiState;
   config?: StrongCodeConfig;
   runner?: AgentRunner;
+  sessionStore?: SessionStore;
+  currentSessionId?: string;
   agent?: Agent;
+  activeAgentId?: string;
+  systemPrompt?: string;
+  jbpPlanReceipt?: PlanReceipt;
+  trustedConfig?: boolean;
+  workspaceRoot?: string;
+  questionBroker?: QuestionBroker;
+  questionSimplifier?: DeepSeekQuestionSimplifier;
 }
 
 interface TuiServices {
@@ -205,7 +459,17 @@ interface TuiServices {
   modelProviderFilter?: string;
   authProviderId?: string;
   authProviderTitle?: string;
+  authProviderEndpoint?: string;
   customProviderForm: CustomProviderFormState;
+  controls: ModelUiControls;
+  telemetry: SessionTelemetry;
+  helpOpen: boolean;
+  summaryOpen: boolean;
+  turnRunning: boolean;
+  lastReceipt?: TurnReceipt;
+  submitTurn?: (input: string, approvedPlan?: ApprovedPlan) => Promise<void>;
+  onSummary?: () => void;
+  onAgentChanged?: () => void;
 }
 
 interface CustomProviderFormState {
@@ -258,7 +522,7 @@ function defaultCustomProviderForm(): CustomProviderFormState {
   };
 }
 
-async function createTuiServices(tuiConfig: TuiConfig, dataDir?: string): Promise<TuiServices> {
+export async function createTuiServices(tuiConfig: TuiConfig, dataDir?: string, state?: TuiState, trustedConfig = false): Promise<TuiServices> {
   const historyStore = dataDir ? new PromptHistoryStore(dataDir) : undefined;
   return {
     tuiConfig,
@@ -276,8 +540,22 @@ async function createTuiServices(tuiConfig: TuiConfig, dataDir?: string): Promis
     promptDraft: "",
     providerQuery: "",
     authInputDraft: "",
-    providerAuth: dataDir ? await new ProviderAuthStore(dataDir).all() : {},
-    customProviderForm: defaultCustomProviderForm()
+    providerAuth: dataDir
+      ? await new ProviderAuthStore(dataDir, { allowEnvironmentContent: trustedConfig }).all()
+      : {},
+    customProviderForm: defaultCustomProviderForm(),
+    controls: modelUiControls(state?.modelOptions, state?.provider),
+    telemetry: {
+      totalTokens: state?.totalTokens,
+      costUsd: state?.costUsd,
+      toolCalls: 0,
+      skillsRead: undefined,
+      mcpServersLoaded: state?.mcpServersLoaded,
+      mcpServersUsed: undefined
+    },
+    helpOpen: false,
+    summaryOpen: false,
+    turnRunning: false
   };
 }
 
@@ -320,13 +598,23 @@ async function renderSessionList(runtime: RuntimeState): Promise<string> {
 
 export function providerPickerDescription(providerId: string): string {
   return {
-    openai: "(ChatGPT Plus/Pro or API key)",
+    chatgpt: "(ChatGPT browser/headless login)",
+    openai: "(OpenAI API key)",
     anthropic: "(API key)",
     kimi: "(Moonshot API key)",
     grok: "(xAI API key)",
     mock: "(local mock provider)",
     custom: "(OpenAI-compatible custom provider)"
   }[providerId] ?? "";
+}
+
+export function providerEndpointLabel(baseUrl: string | undefined): string | undefined {
+  if (!baseUrl) return undefined;
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return "invalid provider endpoint";
+  }
 }
 
 export function providerDialogTitle(providerId: string, displayName: string): string {
@@ -350,6 +638,11 @@ export function providerPickerPriority(providerId: string): number {
 
 export function isValidCustomProviderId(providerId: string): boolean {
   return /^[a-z0-9_-]+$/.test(providerId);
+}
+
+export function isAvailableCustomProviderId(config: StrongCodeConfig | undefined, providerId: string, editingProviderId = "custom"): boolean {
+  return isValidCustomProviderId(providerId)
+    && (!config?.providers[providerId] || providerId === editingProviderId);
 }
 
 export function apiKeyEnvForProviderId(providerId: string): string {
@@ -462,7 +755,10 @@ function renderModelPicker(runtime: RuntimeState, selectedIndexOverride?: number
   if (!runtime.config) return "Config missing. Run 'strongcode init' first.";
   const models = modelPickerEntriesForProvider(runtime, providerFilter);
   const selectedIndex = selectedIndexOverride ?? selectedModelIndex(runtime);
-  const title = providerFilter ? sanitizeDisplayValue(runtime.config.providers[providerFilter]?.displayName ?? providerFilter, providerFilter) : "Select model";
+  const agent = sanitizeDisplayValue(runtime.state.defaultAgent, runtime.activeAgentId ?? runtime.config.defaultAgent);
+  const title = providerFilter
+    ? `${sanitizeDisplayValue(runtime.config.providers[providerFilter]?.displayName ?? providerFilter, providerFilter)} · ${agent}`
+    : `Select model for ${agent}`;
   return renderPickerSurface(title, models.map(([modelId, model]) => ({
     id: modelId,
     label: `${model.enabled === false ? "○" : "●"} ${sanitizeDisplayValue(model.displayName ?? modelId, "unknown")}`,
@@ -472,48 +768,58 @@ function renderModelPicker(runtime: RuntimeState, selectedIndexOverride?: number
 
 function providerDialogOptions(runtime: RuntimeState, services: TuiServices, query = ""): ProviderDialogOption[] {
   if (!runtime.config) return [];
-  const catalog = createProviderCatalog(runtime.config, services.providerAuth);
+  const catalog = createProviderCatalog(runtime.config, services.providerAuth, {
+    allowEnvironmentCredentials: runtime.trustedConfig === true
+  });
   const catalogByProvider = new Map(catalog.all.map(provider => [provider.id, provider]));
   const providers = providerPickerEntries(runtime, query);
   return providers.map(([providerId, provider]): ProviderDialogOption => {
     const displayName = sanitizeDisplayValue(provider.displayName, providerId);
     const catalogProvider = catalogByProvider.get(providerId);
     const apiKeyEnv = provider.apiKeyEnv ? sanitizeDisplayValue(provider.apiKeyEnv, "unknown") : undefined;
-    const connectedByAuth = Boolean(catalogProvider?.connected && provider.apiKeyEnv && !process.env[provider.apiKeyEnv]);
+    const environmentConnected = Boolean(runtime.trustedConfig === true && provider.apiKeyEnv && process.env[provider.apiKeyEnv]);
+    const connectedByAuth = Boolean(catalogProvider?.connected && provider.apiKeyEnv && !environmentConnected);
+    const endpoint = providerEndpointLabel(provider.baseUrl);
     return {
       id: providerId,
       title: providerDialogTitle(providerId, displayName),
-      description: sanitizeDisplayValue(providerPickerDescription(providerId), providerId),
+      description: sanitizeDisplayValue([endpoint ? `@ ${endpoint}` : "", providerPickerDescription(providerId)].filter(Boolean).join(" "), providerId),
       category: providerDialogCategory(providerId),
       connected: catalogProvider?.connected ?? provider.enabled !== false,
-      footer: connectedByAuth ? "auth.json" : provider.apiKeyEnv && process.env[provider.apiKeyEnv] ? `env ${apiKeyEnv}` : undefined
+      footer: connectedByAuth ? "auth.json" : environmentConnected ? `env ${apiKeyEnv}` : undefined
     };
   });
 }
 
 export function providerAuthOverlayForMethods(methods: ProviderAuthMethodDetail[]): TuiServices["startupOverlay"] | undefined {
-  if (methods.length > 1) return "providerAuthMethod";
+  if (methods.length > 1 || methods.some(method => method.type === "delegated" || method.type === "oauth")) return "providerAuthMethod";
   if (methods.some(method => method.type === "api")) return "providerAuth";
   return undefined;
 }
 
 export function connectCommandForProviderAuthMethod(providerId: string, method: ProviderAuthMethodDetail): string | undefined {
-  if (providerId === "openai" && method.type === "oauth") return `/connect ${providerId} chatgpt-browser`;
+  if (providerId === "chatgpt" && method.type === "oauth") {
+    return method.id === "device-code" ? "/connect chatgpt headless" : "/connect chatgpt browser";
+  }
   return undefined;
 }
 
-function authStoreForConfig(config: StrongCodeConfig, configPath = DEFAULT_CONFIG_PATH): ProviderAuthStore {
-  return new ProviderAuthStore(path.resolve(path.dirname(path.resolve(configPath)), config.dataDir));
+function authStoreForConfig(config: StrongCodeConfig, configPath = DEFAULT_CONFIG_PATH, allowEnvironmentContent = false): ProviderAuthStore {
+  const runtimeDataDir = path.resolve(path.dirname(path.resolve(configPath)), config.dataDir);
+  const authDataDir = resolveRuntimeAuthDataDir(configPath, runtimeDataDir);
+  return new ProviderAuthStore(authDataDir, { allowEnvironmentContent });
 }
 
 function providerAuthMethods(runtime: RuntimeState, providerId: string): ProviderAuthMethodDetail[] {
   if (!runtime.config) return [];
-  const service = new ProviderService(runtime.config, authStoreForConfig(runtime.config, runtime.state.configPath));
+  const service = new ProviderService(runtime.config, authStoreForConfig(runtime.config, runtime.state.configPath, runtime.trustedConfig === true));
   return service.authMethods()[providerId] ?? [];
 }
 
 async function reloadProviderAuth(runtime: RuntimeState, services: TuiServices): Promise<void> {
-  services.providerAuth = runtime.config ? await authStoreForConfig(runtime.config, runtime.state.configPath).all() : {};
+  services.providerAuth = runtime.config
+    ? await authStoreForConfig(runtime.config, runtime.state.configPath, runtime.trustedConfig === true).all()
+    : {};
 }
 
 async function refreshAuthenticatedProviderModels(runtime: RuntimeState): Promise<string[]> {
@@ -521,18 +827,21 @@ async function refreshAuthenticatedProviderModels(runtime: RuntimeState): Promis
   const providerId = runtime.state.provider && runtime.state.provider !== "N/A" ? runtime.state.provider : "mock";
   const provider = runtime.config.providers[providerId];
   if (!provider || provider.type === "mock" || !provider.baseUrl) return [];
+  if (!["openai", "openai-compatible", "anthropic", "google"].includes(provider.type)) return [];
 
   try {
-    const authStore = authStoreForConfig(runtime.config, runtime.state.configPath);
-    const discovered = await discoverOpenAICompatibleModels({
+    const authStore = authStoreForConfig(runtime.config, runtime.state.configPath, runtime.trustedConfig === true);
+    const discovered = await discoverProviderModels({
       id: providerId,
       type: provider.type,
       displayName: provider.displayName,
       apiKeyEnv: provider.apiKeyEnv,
       baseUrl: provider.baseUrl,
       modelsEndpoint: provider.modelsEndpoint,
+      allowUnauthenticated: provider.allowUnauthenticated,
       enabled: provider.enabled,
-      authStore
+      authStore,
+      allowEnvironmentCredentials: runtime.trustedConfig === true
     }, globalFetchTransport());
     if (discovered.length === 0) return [];
 
@@ -577,6 +886,45 @@ function renderRuntimeDashboard(runtime: RuntimeState, services: TuiServices): s
   ].join("\n");
 }
 
+function renderTextSessionSummary(runtime: RuntimeState, services: TuiServices): string {
+  return [
+    "Session Summary",
+    "────────────────────────────────────────────────────────────────────────────────",
+    `Agent       ${sanitizeDisplayValue(runtime.state.defaultAgent, "default")}`,
+    `Model       ${activeModelLabel(runtime.state)}`,
+    `Usage       ${sessionTelemetryLine(services.telemetry)}`,
+    `Tools       ${services.telemetry.toolCalls}`,
+    `Skills      ${services.telemetry.skillsRead ?? "—"}`,
+    `MCP used    ${services.telemetry.mcpServersUsed ?? "—"}`,
+    `Reasoning   ${reasoningLabel(services.controls)}`,
+    `Fast mode   ${fastModeLabel(services.controls)}`,
+    "",
+    "Latest turn",
+    services.lastReceipt ? turnReceiptLine(services.lastReceipt) : "No completed turns yet."
+  ].map(line => clipDisplayLine(line)).join("\n");
+}
+
+export function renderAgentRoster(activeAgentId?: string, config?: StrongCodeConfig): string {
+  const activeDefinition = activeAgentId ? getAgentDefinition(activeAgentId) : undefined;
+  const rows = listAgentDefinitions().map(agent => {
+    const active = activeDefinition?.id === agent.id || (!activeDefinition && activeAgentId === agent.id);
+    const tier = agent.tier === "primary" ? "main" : "specialist";
+    return `${active ? ">" : " "} ${agent.displayName.padEnd(24)} ${agent.id.padEnd(27)} ${tier} · ${agent.role}`;
+  });
+  const custom = config
+    ? Object.keys(config.agents)
+      .filter(name => !getAgentDefinition(name))
+      .map(name => `${name === activeAgentId ? ">" : " "} ${name.padEnd(24)} ${name.padEnd(27)} custom`)
+    : [];
+  return [
+    "Agents",
+    "Tab / Shift+Tab cycles the four main agents.",
+    "Use /agent <name> to activate a specialist.",
+    ...rows,
+    ...custom
+  ].map(line => clipDisplayLine(line)).join("\n");
+}
+
 function keyEventToInput(key: { name: string; ctrl?: boolean; meta?: boolean; shift?: boolean }): string {
   const modifiers = [key.ctrl ? "ctrl" : "", key.meta ? "meta" : "", key.shift ? "shift" : ""].filter(Boolean);
   return [...modifiers, key.name].join("+").toLowerCase();
@@ -598,6 +946,13 @@ export function nextSelectionIndex(currentIndex: number, length: number, delta: 
 export function selectedSlashCommand<T extends { slash: string }>(commands: T[], selectedIndex: number): T | undefined {
   if (commands.length === 0) return undefined;
   return commands[Math.max(0, Math.min(selectedIndex, commands.length - 1))];
+}
+
+export function slashSelectionValue<T extends { slash: string }>(commands: T[], selectedIndex: number, draft: string): string | undefined {
+  const selected = selectedSlashCommand(commands, selectedIndex);
+  if (selected) return selected.slash;
+  const value = draft.trim();
+  return value.startsWith("/") && value.length > 1 ? value : undefined;
 }
 
 export function scrollTopForSelectedRow(selectedRowIndex: number, viewportHeight: number): number {
@@ -659,15 +1014,9 @@ function slashQuery(value: string): string | undefined {
   return query.includes(" ") ? undefined : query;
 }
 
-function slashCommands(services: TuiServices) {
-  const query = slashQuery(services.promptDraft) ?? "";
+function slashCommands(services: TuiServices, value = services.promptDraft) {
+  const query = slashQuery(value) ?? "";
   return services.palette.search(query).sort((left, right) => left.slash.localeCompare(right.slash));
-}
-
-export function exactHomeCommandOverlay(value: string): TuiServices["startupOverlay"] | undefined {
-  if (value === "/connect") return "providers";
-  if (value === "/model" || value === "/models") return "models";
-  return undefined;
 }
 
 export function draftHomeCommandOverlay(value: string): TuiServices["startupOverlay"] | undefined {
@@ -680,7 +1029,7 @@ export function shouldSubmitHomePrompt(startupOverlay: string): boolean {
 }
 
 export function shouldSubmitHomeValue(startupOverlay: string, value: string): boolean {
-  return shouldSubmitHomePrompt(startupOverlay) || (startupOverlay === "slashCommands" && exactHomeCommandOverlay(value) !== undefined);
+  return shouldSubmitHomePrompt(startupOverlay) || (startupOverlay === "slashCommands" && fullTuiRouteForInput(value) !== undefined);
 }
 
 function renderHomeOverlayText(runtime: RuntimeState, services: TuiServices): string {
@@ -770,53 +1119,215 @@ async function tryMountSolidStartupShell(renderer: OpenTuiRenderer, runtime: Run
   }
 }
 
+function applyRuntimeAgent(runtime: RuntimeState, agent: Agent): void {
+  if (!runtime.config) throw new StrongCodeError("CONFIG_ERROR", "Config missing. Run 'strongcode init' first.");
+  const modelConfig = runtime.config.models[agent.config.model];
+  if (!modelConfig) throw new StrongCodeError("CONFIG_ERROR", `Model not found: ${agent.config.model}`);
+  runtime.agent = agent;
+  runtime.activeAgentId = agent.name;
+  runtime.state.provider = modelConfig.provider;
+  runtime.state.providerDisplayName = runtime.config.providers[modelConfig.provider]?.displayName;
+  runtime.state.model = agent.config.model;
+  runtime.state.modelDisplayName = modelConfig.displayName;
+  runtime.state.modelOptions = modelConfig.options;
+  runtime.state.defaultAgent = agent.displayName ?? agent.name;
+  runtime.state.agentIdentity = agent.name;
+}
+
+function activateRuntimeAgent(runtime: RuntimeState, agentName: string, explicitPlanApproval = false): Agent {
+  if (!runtime.config) throw new StrongCodeError("CONFIG_ERROR", "Config missing. Run 'strongcode init' first.");
+  const definition = getAgentDefinition(agentName);
+  const approvedPlanExecution = approvedPlanExecutionForActivation(agentName, explicitPlanApproval);
+  const handoffPrompt = approvedPlanExecution
+    ? "Trusted StrongCode session state: the user explicitly invoked /start-work after the active JBP planning phase. Treat the JBP plan in this same session as approved for execution, subject to normal safety and scope checks."
+    : undefined;
+  const agent = createAgent(runtime.config, agentName, {
+    authStore: authStoreForConfig(runtime.config, runtime.state.configPath, runtime.trustedConfig === true),
+    systemPrompt: [runtime.systemPrompt, handoffPrompt].filter(Boolean).join("\n\n") || undefined,
+    allowEnvironmentCredentials: runtime.trustedConfig === true,
+    allowConfiguredSystemPrompt: runtime.trustedConfig === true,
+    approvedPlanExecution,
+    restrictToReadOnlyTools: runtime.trustedConfig !== true && !approvedPlanExecution,
+    workspaceRoot: runtime.workspaceRoot ?? path.resolve(path.dirname(path.resolve(runtime.state.configPath)), runtime.config.workspace)
+  });
+  applyRuntimeAgent(runtime, agent);
+  return agent;
+}
+
 function refreshRuntimeFromConfig(runtime: RuntimeState, config: StrongCodeConfig): void {
   runtime.config = config;
-  const agentConfig = config.agents[config.defaultAgent];
-  const modelConfig = config.models[agentConfig.model];
-  runtime.state.provider = modelConfig.provider;
-  runtime.state.providerDisplayName = config.providers[modelConfig.provider]?.displayName;
-  runtime.state.model = agentConfig.model;
-  runtime.state.modelDisplayName = modelConfig.displayName;
-  runtime.state.defaultAgent = config.defaultAgent;
+  const activeAgent = runtime.activeAgentId ?? config.defaultAgent;
   try {
-    runtime.agent = createAgent(config, config.defaultAgent, { authStore: authStoreForConfig(config, runtime.state.configPath) });
+    activateRuntimeAgent(runtime, activeAgent);
   } catch {
-    runtime.agent = undefined;
+    try {
+      activateRuntimeAgent(runtime, config.defaultAgent);
+    } catch {
+      runtime.agent = undefined;
+    }
   }
 }
 
-async function handleSystemCommand(input: string, runtime: RuntimeState, services: TuiServices, append: (role: "assistant" | "system", text: string) => void | Promise<void>, exit: () => void): Promise<boolean> {
-  if (input === "/exit" || input === "exit" || input === "quit") {
-    exit();
-    return true;
-  }
-  if (input === "/connect" || input.startsWith("/connect ")) {
-    const response = await handleConnectCommand(input, {
-      config: runtime.config,
-      configPath: DEFAULT_CONFIG_PATH,
-      state: runtime.state,
-      noColor: true,
-      onConfigUpdated: config => {
-        refreshRuntimeFromConfig(runtime, config);
-        services.toasts.push("success", "Provider connected.");
+function refreshUiControls(runtime: RuntimeState, services: TuiServices): void {
+  services.controls = modelUiControls(runtime.state.modelOptions, runtime.state.provider);
+}
+
+async function handleSystemCommand(input: string, runtime: RuntimeState, services: TuiServices, append: (role: "assistant" | "system", text: string) => void | Promise<void>, exit: () => void, nestedTurnSubmit?: (input: string, approvedPlan?: ApprovedPlan) => Promise<void>): Promise<boolean> {
+  const command = parseSlashCommand(input);
+  if (!command || command.command === "unknown") return false;
+  if (!slashCommandAllowedDuringTurn(command) && !requireIdleTurn(services.turnRunning, message => { void append("system", message); })) return true;
+
+  switch (command.command) {
+    case "exit":
+      exit();
+      return true;
+    case "help":
+      await append("system", ["StrongCode commands", "───────────────────", ...commandHelpLines()].join("\n"));
+      return true;
+    case "summary":
+      await append("system", renderTextSessionSummary(runtime, services));
+      return true;
+    case "compact":
+      await compactActiveContext(runtime.runner, runtime.agent, runtime.currentSessionId, append);
+      return true;
+    case "agent": {
+      if (command.action === "list") {
+        await append("system", renderAgentRoster(runtime.activeAgentId, runtime.config));
+        return true;
       }
-    });
-    await reloadProviderAuth(runtime, services);
-    append("system", response);
-    return true;
+      try {
+        const requested = command.action === "select"
+          ? command.target
+          : cyclePrimaryAgent(runtime.activeAgentId ?? runtime.config?.defaultAgent ?? "tesla", command.action === "next" ? 1 : -1).id;
+        const agent = activateRuntimeAgent(runtime, requested);
+        refreshUiControls(runtime, services);
+        services.onAgentChanged?.();
+        const provenance = agent.modelResolution?.preference ?? agent.modelResolution?.provenance ?? "configured model";
+        await append("system", clipDisplayLine(`Active agent: ${agent.displayName ?? agent.name} · ${runtime.state.modelDisplayName ?? runtime.state.model ?? "unknown"} · ${provenance}`));
+      } catch (error) {
+        await append("system", clipDisplayLine(`Unable to activate agent: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      return true;
+    }
+    case "start-work": {
+      const activeAgentId = getAgentDefinition(runtime.activeAgentId ?? "")?.id;
+      const availability = slashCommandAvailability(command.command, activeAgentId);
+      if (!availability.available) {
+        await append("system", clipDisplayLine(availability.message));
+        return true;
+      }
+      const submitTurn = nestedTurnSubmit ?? services.submitTurn;
+      if (!submitTurn) {
+        await append("system", clipDisplayLine("Unable to start work because the turn submission path is unavailable. JBP remains active and read-only."));
+        return true;
+      }
+      const runner = runtime.runner;
+      const sessionId = runtime.currentSessionId;
+      const receipt = runtime.jbpPlanReceipt;
+      if (!runner || !sessionId || !receipt) {
+        await append("system", clipDisplayLine("No current JBP plan receipt is available for this session. JBP remains active and read-only."));
+        return true;
+      }
+      runtime.jbpPlanReceipt = undefined;
+      const approvedPlan = runner.consumePlanReceipt(sessionId, receipt);
+      if (!approvedPlan.ok) {
+        await append("system", clipDisplayLine("No current JBP plan receipt is available for this session. JBP remains active and read-only."));
+        return true;
+      }
+      let agent: Agent;
+      try {
+        agent = activateRuntimeAgent(runtime, "bob-the-builder", true);
+        refreshUiControls(runtime, services);
+        services.onAgentChanged?.();
+      } catch (error) {
+        runner.discardApprovedPlan(approvedPlan.value);
+        await append("system", clipDisplayLine(`Unable to start work: ${error instanceof Error ? error.message : String(error)}`));
+        return true;
+      }
+      await append("system", clipDisplayLine(`Plan approved. Active agent: ${agent.displayName ?? agent.name}. Starting the approved plan now.`));
+      try {
+        await submitTurn(START_WORK_HANDOFF_PROMPT, approvedPlan.value);
+      } finally {
+        runner.discardApprovedPlan(approvedPlan.value);
+        try {
+          activateRuntimeAgent(runtime, "bob-the-builder");
+          refreshUiControls(runtime, services);
+          services.onAgentChanged?.();
+        } catch (error) {
+          runtime.agent = undefined;
+          await append("system", clipDisplayLine(`Bob returned to read-only mode but could not be reactivated: ${error instanceof Error ? error.message : String(error)}`));
+        }
+      }
+      return true;
+    }
+    case "connect": {
+      const connectInput = command.rawArgs ? `/connect ${command.rawArgs}` : "/connect";
+      const response = await handleConnectCommand(connectInput, {
+        config: runtime.config,
+        configPath: runtime.state.configPath,
+        state: runtime.state,
+        noColor: true,
+        trustedConfig: runtime.trustedConfig,
+        onAuthPrompt: prompt => { void append("system", [prompt.instructions, prompt.userCode ? `Code: ${prompt.userCode}` : "", prompt.url].filter(Boolean).join("\n")); },
+        onConfigUpdated: config => {
+          refreshRuntimeFromConfig(runtime, config);
+          refreshUiControls(runtime, services);
+          services.toasts.push("success", "Provider connected.");
+        }
+      });
+      await reloadProviderAuth(runtime, services);
+      append("system", response);
+      return true;
+    }
+    case "model": {
+      if (command.action === "open" || command.action === "list") {
+        const failures = services.turnRunning ? [] : await refreshAuthenticatedProviderModels(runtime);
+        const failureOutput = failures.length > 0 ? `${failures.map(failure => clipDisplayLine(failure)).join("\n")}\n` : "";
+        append("system", runtime.config ? `${failureOutput}${renderAllModelList(runtime.config, runtime.state, true)}` : "Config missing. Run 'strongcode init' first.");
+        return true;
+      }
+      if (!runtime.config) {
+        await append("system", "Config missing. Run 'strongcode init' first.");
+        return true;
+      }
+      const requestedAgent = command.agentId
+        ? getAgentDefinition(command.agentId)?.id ?? command.agentId
+        : runtime.activeAgentId ?? runtime.config.defaultAgent;
+      if (!runtime.config.agents[requestedAgent] && !getAgentDefinition(requestedAgent)) {
+        await append("system", clipDisplayLine(`Unknown agent '${requestedAgent}'. Use /agents to list available agents.`));
+        return true;
+      }
+      try {
+        const updated = await persistConfigUpdate({
+          path: runtime.state.configPath,
+          directory: path.dirname(runtime.state.configPath),
+          config: runtime.config
+        }, config => selectModel(config, command.modelId, requestedAgent));
+        refreshRuntimeFromConfig(runtime, updated);
+        refreshUiControls(runtime, services);
+        services.onAgentChanged?.();
+        const configured = updated.agents[requestedAgent]?.model ?? command.modelId;
+        const model = updated.models[configured];
+        const agentLabel = getAgentDefinition(requestedAgent)?.displayName ?? requestedAgent;
+        const modelLabel = model?.displayName ?? configured;
+        services.toasts.push("success", `${agentLabel} now uses ${modelLabel}.`);
+        await append("system", clipDisplayLine(`Model updated: ${agentLabel} → ${modelLabel} (${model?.provider ?? "unknown provider"}).`));
+      } catch (error) {
+        await append("system", clipDisplayLine(`Unable to set model: ${error instanceof Error ? error.message : String(error)}`));
+      }
+      return true;
+    }
+    default:
+      return assertNeverCommand(command);
   }
-  if (input === "/model" || input === "/models") {
-    const failures = await refreshAuthenticatedProviderModels(runtime);
-    const failureOutput = failures.length > 0 ? `${failures.map(failure => clipDisplayLine(failure)).join("\n")}\n` : "";
-    append("system", runtime.config ? `${failureOutput}${renderAllModelList(runtime.config, runtime.state, true)}` : "Config missing. Run 'strongcode init' first.");
-    return true;
-  }
-  return false;
 }
 
-async function loadRuntimeState(): Promise<RuntimeState> {
-  const configPath = DEFAULT_CONFIG_PATH;
+function assertNeverCommand(command: never): never {
+  throw new Error(`Unexpected slash command: ${String(command)}`);
+}
+
+async function loadRuntimeState(currentSessionId: string): Promise<RuntimeState> {
+  const configPath = resolveConfigPath();
   const configExists = existsSync(configPath);
   const state: TuiState = {
     provider: "N/A",
@@ -825,25 +1336,57 @@ async function loadRuntimeState(): Promise<RuntimeState> {
     configMissing: !configExists
   };
 
-  if (!configExists) return { state };
+  if (!configExists) return { state, currentSessionId };
 
-  const runtime = await requireRuntime(configPath);
-  const agentName = runtime.config.defaultAgent;
-  const agentConfig = runtime.config.agents[agentName];
-  const modelConfig = runtime.config.models[agentConfig.model];
+  const runtime = await requireRuntime();
+  const authStore = createRuntimeAuthReader(runtime.authDataDir, undefined, { allowEnvironmentContent: runtime.trustedConfig });
+  const agent = createAgent(runtime.config, runtime.config.defaultAgent, {
+    authStore,
+    systemPrompt: runtime.systemPrompt,
+    allowEnvironmentCredentials: runtime.trustedConfig,
+    allowConfiguredSystemPrompt: runtime.trustedConfig,
+    restrictToReadOnlyTools: !runtime.trustedConfig,
+    workspaceRoot: runtime.context.workspaceRoot
+  });
+  const modelConfig = runtime.config.models[agent.config.model];
   state.provider = modelConfig.provider;
   state.providerDisplayName = runtime.config.providers[modelConfig.provider]?.displayName;
-  state.model = agentConfig.model;
+  state.model = agent.config.model;
   state.modelDisplayName = modelConfig.displayName;
-  state.defaultAgent = agentName;
+  state.modelOptions = modelConfig.options;
+  state.defaultAgent = agent.displayName ?? agent.name;
+  state.agentIdentity = agent.name;
   state.workspace = runtime.config.workspace;
   state.dataDir = runtime.config.dataDir;
 
+  const sessionStore = new SessionStore(runtime.context.dataDir);
+  const registry = await createRuntimeToolRegistry(runtime.context, { allowMcp: runtime.trustedConfig });
+  const questionRuntime = installQuestionRuntime(registry, {
+    context: runtime.context,
+    authStore,
+    allowEnvironmentCredentials: runtime.trustedConfig
+  });
   return {
     state,
     config: runtime.config,
-    agent: createAgent(runtime.config, runtime.config.defaultAgent, { authStore: new ProviderAuthStore(runtime.context.dataDir) }),
-    runner: new AgentRunner(runtime.context, new SessionStore(runtime.context.dataDir), createDefaultToolRegistry())
+    agent,
+    activeAgentId: agent.name,
+    systemPrompt: runtime.systemPrompt,
+    trustedConfig: runtime.trustedConfig,
+    workspaceRoot: runtime.context.workspaceRoot,
+    currentSessionId,
+    sessionStore,
+    questionBroker: questionRuntime.broker,
+    questionSimplifier: questionRuntime.simplifier,
+    runner: runtime.runnerFactory.create({
+      sessions: sessionStore,
+      tools: registry,
+    providerOptions: {
+      authStore,
+      allowEnvironmentCredentials: runtime.trustedConfig,
+        workspaceRoot: runtime.context.workspaceRoot
+      }
+    })
   };
 }
 
@@ -868,30 +1411,34 @@ function promptStatusLabel(value: string | undefined, fallback: string): string 
   return label && label !== "N/A" ? label : fallback;
 }
 
-function modelLine(state: TuiState): string {
+function modelLine(core: OpenTuiCore, state: TuiState, _controls: ModelUiControls) {
   const model = promptStatusLabel(state.model, "mock");
   const modelDisplay = promptStatusLabel(state.modelDisplayName, model);
-  const modelLabel = modelDisplay !== model ? `${modelDisplay} (${model})` : model;
-  return clipDisplayLine(`Strong Code · ${modelLabel}`, 71);
+  const agent = getAgentDisplayName(state.agentIdentity, promptStatusLabel(state.defaultAgent, "default"));
+  return core.t`${agent} · ${core.fg(COLORS.text)(modelDisplay)} · 🧠 · ⚡`;
 }
 
-interface PromptElements {
+export interface PromptElements {
   textarea: OpenTuiTextarea;
   anchor: OpenTuiBox;
+  meta: OpenTuiText;
+  resize(width: number): void;
 }
 
-function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, state: TuiState, initialValue: string, onSubmit: (value: string) => void, onContentChange?: () => void): PromptElements {
+export function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, state: TuiState, controls: ModelUiControls, initialValue: string, onSubmit: (value: string) => void, onContentChange?: () => void, width = HOME_PROMPT_WIDTH, hintText = "/model switch · Tab agents · Ctrl+H commands · Shift+Enter newline"): PromptElements {
   const promptOuter = new core.BoxRenderable(renderer, {
-    width: HOME_PROMPT_WIDTH,
-    height: 7,
+    width,
+    maxWidth: width,
+    height: 5,
     flexDirection: "row",
-    flexShrink: 0
+    flexShrink: 0,
+    overflow: "hidden"
   });
   parent.add(promptOuter);
 
   const accent = new core.BoxRenderable(renderer, {
     width: 1,
-    height: 6,
+    height: 5,
     backgroundColor: COLORS.primary,
     flexShrink: 0
   });
@@ -899,20 +1446,27 @@ function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: Open
 
   const promptPanel = new core.BoxRenderable(renderer, {
     flexGrow: 1,
+    flexShrink: 1,
+    width: Math.max(1, width - 1),
+    maxWidth: Math.max(1, width - 1),
     minWidth: 0,
-    height: 6,
+    height: 5,
     backgroundColor: COLORS.element,
-    paddingLeft: 2,
-    paddingRight: 2,
+    paddingLeft: 3,
+    paddingRight: 3,
     paddingTop: 1,
-    flexDirection: "column"
+    flexDirection: "column",
+    overflow: "hidden"
   });
   promptOuter.add(promptPanel);
 
   let textarea!: OpenTuiTextarea;
   textarea = new core.TextareaRenderable(renderer, {
     width: "100%",
-    height: 4,
+    maxWidth: "100%",
+    minWidth: 0,
+    flexShrink: 1,
+    height: 1,
     initialValue,
     placeholder: "Ask anything... \"Fix a TODO in the codebase\"  / for commands",
     placeholderColor: COLORS.muted,
@@ -922,30 +1476,82 @@ function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: Open
     focusedBackgroundColor: COLORS.element,
     cursorColor: COLORS.text,
     wrapMode: "word",
+    overflow: "hidden",
     onSubmit: () => {
-      const value = textarea.plainText.trim();
+      const value = textarea.plainText;
       textarea.clear();
-      if (value) onSubmit(value);
+      if (value.trim()) onSubmit(value);
     }
   });
-  if (onContentChange) {
-    textarea.onContentChange = () => setImmediate(onContentChange);
-  }
+  const syncPromptHeight = () => setImmediate(() => {
+    if (textarea.isDestroyed || promptOuter.isDestroyed || promptPanel.isDestroyed) return;
+    const rows = promptHeightForVisualLines(textarea.editorView.getTotalVirtualLineCount() || textarea.lineCount || 1);
+    textarea.height = rows;
+    promptOuter.height = rows + 4;
+    promptPanel.height = rows + 4;
+    accent.height = rows + 4;
+    onContentChange?.();
+    renderer.requestRender();
+  });
+  textarea.onContentChange = syncPromptHeight;
   if (initialValue) textarea.cursorOffset = initialValue.length;
   promptPanel.add(textarea);
 
   const meta = new core.TextRenderable(renderer, {
-    content: modelLine(state),
+    content: modelLine(core, state, controls),
     fg: COLORS.primary,
     bg: COLORS.element,
-    height: 1
+    height: 1,
+    marginTop: 1,
+    wrapMode: "none",
+    truncate: true
   });
   promptPanel.add(meta);
-  
-  return { textarea, anchor: promptOuter };
+
+  const hint = new core.TextRenderable(renderer, {
+    content: hintText,
+    fg: COLORS.muted,
+    bg: COLORS.element,
+    height: 1,
+    wrapMode: "none"
+  });
+  promptPanel.add(hint);
+  syncPromptHeight();
+
+  const resize = (nextWidth: number) => {
+    const bounded = Math.max(20, Math.round(nextWidth));
+    promptOuter.width = bounded;
+    promptOuter.maxWidth = bounded;
+    promptPanel.width = Math.max(1, bounded - 1);
+    promptPanel.maxWidth = Math.max(1, bounded - 1);
+    renderer.once("frame", syncPromptHeight);
+    renderer.requestRender();
+  };
+  return { textarea, anchor: promptOuter, meta, resize };
 }
 
-function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scroll: OpenTuiScrollBox, role: "user" | "assistant" | "system", text: string, state: TuiState): void {
+function shouldFollowLatest(scroll: OpenTuiScrollBox): boolean {
+  return shouldFollowLatestPosition(scroll.scrollHeight, scroll.scrollTop, scroll.height);
+}
+
+function followLatestAfterLayout(renderer: OpenTuiRenderer, scroll: OpenTuiScrollBox, shouldFollow: boolean): void {
+  if (!shouldFollow) return;
+  setImmediate(() => {
+    scroll.scrollTo(scroll.scrollHeight);
+    renderer.requestRender();
+  });
+}
+
+function reasoningDisclosureHeaders(root: OpenTuiRoot): OpenTuiRenderable[] {
+  return Array.from({ length: reasoningDisclosureCount }, (_, index) => (
+    root.findDescendantById(`${REASONING_DISCLOSURE_ID_PREFIX}${index + 1}`)
+  )).flatMap(header => header === undefined ? [] : [header]);
+}
+
+export function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scroll: OpenTuiScrollBox, role: "user" | "assistant" | "system", text: string, state: TuiState, receipt?: TurnReceipt, reasoning?: string): OpenTuiBox {
+  const follow = shouldFollowLatest(scroll);
+  const agent = sanitizeDisplayValue(state.defaultAgent, "default");
+  const model = sanitizeDisplayValue(state.modelDisplayName ?? state.model, "mock");
   if (role === "user") {
     const box = new core.BoxRenderable(renderer, {
       width: "100%",
@@ -958,10 +1564,11 @@ function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scroll: Ope
       paddingBottom: 1,
       marginTop: 1
     });
-    box.add(new core.TextRenderable(renderer, { content: sanitizeDisplayValue(text, ""), fg: COLORS.text, bg: COLORS.panel, wrapMode: "word", height: "auto" }));
+    box.add(new core.TextRenderable(renderer, { content: sanitizeMultilineDisplayValue(text, ""), fg: COLORS.text, bg: COLORS.panel, wrapMode: "word", height: "auto" }));
+    box.add(new core.TextRenderable(renderer, { content: `Sent to ${agent} · ${model}`, fg: COLORS.muted, bg: COLORS.panel, wrapMode: "none", height: 1, marginTop: 1 }));
     scroll.add(box);
-    scroll.scrollTo(scroll.scrollHeight);
-    return;
+    followLatestAfterLayout(renderer, scroll, follow);
+    return box;
   }
 
   const box = new core.BoxRenderable(renderer, {
@@ -970,20 +1577,115 @@ function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scroll: Ope
     marginTop: 1,
     flexDirection: "column"
   });
-  box.add(new core.TextRenderable(renderer, { content: sanitizeDisplayValue(text, ""), fg: role === "system" ? COLORS.warning : COLORS.text, wrapMode: "word", height: "auto" }));
-  if (role === "assistant") box.add(new core.TextRenderable(renderer, { content: `▣ Build · ${sanitizeDisplayValue(state.model, "mock")} ${sanitizeDisplayValue(state.provider, "mock")}`, fg: COLORS.muted, height: 1 }));
+  const completedReasoning = role === "assistant" ? sanitizeMultilineDisplayValue(reasoning, "") : "";
+  if (completedReasoning.trim()) {
+    let expanded = false;
+    const body = new core.TextRenderable(renderer, {
+      content: completedReasoning,
+      fg: COLORS.text,
+      wrapMode: "word",
+      height: "auto",
+      visible: false
+    });
+    const header = new core.BoxRenderable(renderer, {
+      id: `${REASONING_DISCLOSURE_ID_PREFIX}${++reasoningDisclosureCount}`,
+      width: "100%",
+      height: 1,
+      focusable: true,
+      onMouseDown: event => {
+        if (event.button !== 0) return;
+        header.focus();
+        renderer.focusRenderable(header);
+        toggleReasoning();
+      },
+      onKeyDown: key => {
+        const name = key.name.toLowerCase();
+        if (name !== "return" && name !== "enter" && name !== "space") return;
+        key.preventDefault();
+        key.stopPropagation();
+        toggleReasoning();
+      }
+    });
+    const label = new core.TextRenderable(renderer, { content: "[+] Reasoning", fg: COLORS.muted, height: 1, wrapMode: "none" });
+    const refreshLabelColor = (): void => {
+      label.fg = header.focused || expanded ? COLORS.primary : COLORS.muted;
+      renderer.requestRender();
+    };
+    const toggleReasoning = (): void => {
+      const follow = shouldFollowLatest(scroll);
+      expanded = !expanded;
+      label.content = expanded ? "[-] Reasoning" : "[+] Reasoning";
+      refreshLabelColor();
+      body.visible = expanded;
+      followLatestAfterLayout(renderer, scroll, follow);
+    };
+    header.on(core.RenderableEvents.FOCUSED, refreshLabelColor);
+    header.on(core.RenderableEvents.BLURRED, refreshLabelColor);
+    const cleanupLabelColorListeners = (): void => {
+      header.off(core.RenderableEvents.FOCUSED, refreshLabelColor);
+      header.off(core.RenderableEvents.BLURRED, refreshLabelColor);
+    };
+    header.on(core.RenderableEvents.DESTROYED, cleanupLabelColorListeners);
+    header.add(label);
+    box.add(header);
+    box.add(body);
+  }
+  box.add(new core.TextRenderable(renderer, { content: sanitizeMultilineDisplayValue(text, ""), fg: role === "system" ? COLORS.warning : COLORS.text, wrapMode: "word", height: "auto" }));
+  if (role === "assistant") {
+    const completion = receipt ?? { status: "finished", agent, model, durationMs: Number.NaN, toolCalls: Number.NaN };
+    box.add(new core.TextRenderable(renderer, {
+      content: `${turnStatusIcon(completion.status)} ${turnReceiptLine(completion)}`,
+      fg: completion.status === "failed" ? COLORS.warning : COLORS.muted,
+      height: 1,
+      wrapMode: "none",
+      marginTop: 1
+    }));
+  }
   scroll.add(box);
-  scroll.scrollTo(scroll.scrollHeight);
+  followLatestAfterLayout(renderer, scroll, follow);
+  return box;
 }
 
-function addSlashCommandOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, services: TuiServices): void {
+export function appendPendingMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scroll: OpenTuiScrollBox, state: TuiState, startedAt: number): { box: OpenTuiBox; status: OpenTuiText; stop(): void } {
+  const follow = shouldFollowLatest(scroll);
+  const agent = sanitizeDisplayValue(state.defaultAgent, "default");
+  const model = sanitizeDisplayValue(state.modelDisplayName ?? state.model, "mock");
+  const box = new core.BoxRenderable(renderer, { width: "100%", paddingLeft: 3, marginTop: 1, flexDirection: "column" });
+  const status = new core.TextRenderable(renderer, { content: `◌ ${agent} is working · ${model} · 0s`, fg: COLORS.secondary, height: 1, wrapMode: "none" });
+  box.add(status);
+  scroll.add(box);
+  followLatestAfterLayout(renderer, scroll, follow);
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (status.isDestroyed || renderer.isDestroyed) {
+      clearInterval(timer);
+      stopped = true;
+      return;
+    }
+    status.content = `◌ ${agent} is working · ${model} · ${Math.max(1, Math.floor((Date.now() - startedAt) / 1000))}s`;
+    renderer.requestRender();
+  }, 1000);
+  return {
+    box,
+    status,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      if (!scroll.isDestroyed && scroll.getRenderable(box.id)) scroll.remove(box.id);
+      if (!renderer.isDestroyed) renderer.requestRender();
+    }
+  };
+}
+
+function addSlashCommandOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, services: TuiServices, callbacks: Pick<ProviderDialogCallbacks, "onSlashFocus" | "onSlashSelect">): OpenTuiBox {
   const commands = slashCommands(services);
   const maxStart = Math.max(0, commands.length - SLASH_COMMAND_LIMIT);
   const startIndex = Math.max(0, Math.min(services.slashScrollIndex, maxStart));
   const visibleCommands = commands.slice(startIndex, startIndex + SLASH_COMMAND_LIMIT);
   const height = Math.max(1, visibleCommands.length) + 2;
   const menu = new core.BoxRenderable(renderer, {
-    width: HOME_PROMPT_WIDTH,
+    width: Math.max(44, Math.min(HOME_PROMPT_WIDTH, renderer.width - 4)),
     height,
     flexDirection: "column",
     border: true,
@@ -997,30 +1699,61 @@ function addSlashCommandOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer, pa
     const row = new core.BoxRenderable(renderer, { width: "100%", height: 1, paddingLeft: 1, paddingRight: 1, backgroundColor: COLORS.panel });
     row.add(new core.TextRenderable(renderer, { content: "No matching items", fg: COLORS.muted, bg: COLORS.panel, height: 1 }));
     menu.add(row);
-    return;
+    return menu;
   }
 
   const triggerWidth = Math.min(22, Math.max(...visibleCommands.map(command => command.slash.length)) + 2);
   visibleCommands.forEach((command, index) => {
-    const selected = index + startIndex === services.slashIndex;
+    const commandIndex = index + startIndex;
+    const selected = commandIndex === services.slashIndex;
     const background = selected ? COLORS.primary : COLORS.panel;
     const foreground = selected ? COLORS.background : COLORS.text;
     const muted = selected ? COLORS.background : COLORS.muted;
     const row = new core.BoxRenderable(renderer, {
+      id: `slash-command-${command.id}`,
       width: "100%",
       height: 1,
       paddingLeft: 1,
       paddingRight: 1,
       backgroundColor: background,
-      flexDirection: "row"
+      flexDirection: "row",
+      onMouseOver: () => callbacks.onSlashFocus(commandIndex),
+      onMouseDown: event => {
+        if (event.button === 0) callbacks.onSlashSelect(commandIndex);
+      }
     });
     row.add(new core.TextRenderable(renderer, { content: command.slash.padEnd(triggerWidth), fg: foreground, bg: background, width: triggerWidth, height: 1 }));
     row.add(new core.TextRenderable(renderer, { content: sanitizeDisplayValue(command.description, ""), fg: muted, bg: background, height: 1, wrapMode: "none" }));
     menu.add(row);
   });
+  return menu;
 }
 
-interface ProviderDialogCallbacks {
+function removeSessionSlashCommandOverlay(root: OpenTuiRoot): void {
+  if (root.getRenderable("session-slash-overlay")) root.remove("session-slash-overlay");
+}
+
+function addSessionSlashCommandOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer, services: TuiServices, callbacks: Pick<ProviderDialogCallbacks, "onSlashFocus" | "onSlashSelect">): void {
+  removeSessionSlashCommandOverlay(renderer.root);
+  const width = Math.max(44, Math.min(HOME_PROMPT_WIDTH, renderer.width - 4));
+  const layer = new core.BoxRenderable(renderer, {
+    id: "session-slash-overlay",
+    position: "absolute",
+    left: Math.max(0, Math.floor((renderer.width - width) / 2)),
+    bottom: 6,
+    width,
+    height: Math.min(SLASH_COMMAND_LIMIT, Math.max(1, slashCommands(services).length)) + 2,
+    zIndex: 85,
+    flexDirection: "column"
+  });
+  renderer.root.add(layer);
+  addSlashCommandOverlay(core, renderer, layer, services, callbacks);
+  renderer.requestRender();
+}
+
+export interface ProviderDialogCallbacks {
+  onSlashFocus(index: number): void;
+  onSlashSelect(index: number): void;
   onProviderSelect(index: number): void;
   onProviderQueryChange(): void;
   onProviderAuthMethodSelect(index: number): void;
@@ -1136,14 +1869,12 @@ function addProviderSelectDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, p
       paddingLeft: option.connected ? 1 : 3,
       paddingRight: 3,
       backgroundColor: background,
-      onMouseDown: () => {
-        services.pickerIndex = index;
-        callbacks.onProviderQueryChange();
-      },
-      onMouseUp: () => callbacks.onProviderSelect(index)
+      onMouseDown: event => {
+        if (event.button === 0) callbacks.onProviderSelect(index);
+      }
     });
     if (option.connected) row.add(new core.TextRenderable(renderer, { content: "✓", fg: selected ? foreground : COLORS.success, bg: background, width: 2, height: 1 }));
-    row.add(new core.TextRenderable(renderer, { content: `${option.title}${option.description ? ` ${option.description}` : ""}`, fg: foreground, bg: background, height: 1, width: option.footer ? 42 : 52, wrapMode: "none" }));
+    row.add(new core.TextRenderable(renderer, { content: `${option.description ? `${option.description} · ` : ""}${option.title}`, fg: foreground, bg: background, height: 1, width: option.footer ? 42 : 52, wrapMode: "none" }));
     if (option.footer) row.add(new core.TextRenderable(renderer, { content: option.footer, fg: muted, bg: background, height: 1, width: 10, wrapMode: "none" }));
     scroll.add(row);
     rowIndex++;
@@ -1159,6 +1890,15 @@ function addProviderAuthDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, par
   const body = new core.BoxRenderable(renderer, { width: "100%", flexDirection: "column", gap: 1, paddingLeft: 2, paddingRight: 2, paddingTop: 1, backgroundColor: COLORS.panel });
   modal.add(body);
   body.add(new core.TextRenderable(renderer, { content: description, fg: COLORS.muted, bg: COLORS.panel, height: 1, wrapMode: "word" }));
+  if (services.authProviderEndpoint) {
+    body.add(new core.TextRenderable(renderer, {
+      content: `Verify endpoint before pasting: ${services.authProviderEndpoint}`,
+      fg: COLORS.warning,
+      bg: COLORS.panel,
+      height: 1,
+      wrapMode: "word"
+    }));
+  }
 
   let textarea!: OpenTuiTextarea;
   textarea = new core.TextareaRenderable(renderer, {
@@ -1172,6 +1912,7 @@ function addProviderAuthDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, par
     backgroundColor: COLORS.element,
     focusedBackgroundColor: COLORS.element,
     cursorColor: COLORS.primary,
+    attributes: core.createTextAttributes({ hidden: true }),
     wrapMode: "none",
     onContentChange: () => {
       services.authInputDraft = textarea.plainText;
@@ -1207,8 +1948,7 @@ function addFormInput(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: Open
     backgroundColor: COLORS.element,
     border: selected ? true : false,
     borderColor: selected ? COLORS.border : COLORS.element,
-    onMouseDown: () => callbacks.onCustomProviderFieldFocus(index),
-    onMouseUp: () => callbacks.onCustomProviderFieldFocus(index)
+    onMouseDown: () => callbacks.onCustomProviderFieldFocus(index)
   });
   parent.add(inputBox);
 
@@ -1223,6 +1963,7 @@ function addFormInput(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: Open
     focusedTextColor: COLORS.text,
     placeholderColor: COLORS.muted,
     cursorColor: COLORS.primary,
+    attributes: field.secret ? core.createTextAttributes({ hidden: true }) : undefined,
     onContentChange: () => {
       services.customProviderForm[field.key] = input.plainText;
       services.customProviderForm.cursorOffsets[field.key] = input.cursorOffset;
@@ -1274,8 +2015,11 @@ function addCustomProviderModelPanel(core: OpenTuiCore, renderer: OpenTuiRendere
     marginTop: 1,
     paddingLeft: 1,
     backgroundColor: buttonBackground,
-    onMouseDown: () => callbacks.onCustomProviderFieldFocus(CUSTOM_PROVIDER_DISCOVER_INDEX),
-    onMouseUp: () => callbacks.onCustomProviderDiscover()
+    onMouseDown: event => {
+      if (event.button !== 0) return;
+      services.customProviderForm.focusIndex = CUSTOM_PROVIDER_DISCOVER_INDEX;
+      callbacks.onCustomProviderDiscover();
+    }
   });
   panel.add(button);
   const buttonText = discovery.status === "loading"
@@ -1319,8 +2063,12 @@ function addCustomProviderModelPanel(core: OpenTuiCore, renderer: OpenTuiRendere
       height: 1,
       flexDirection: "row",
       backgroundColor: background,
-      onMouseDown: () => callbacks.onCustomProviderFieldFocus(CUSTOM_PROVIDER_DISCOVER_INDEX),
-      onMouseUp: () => callbacks.onCustomProviderModelToggle(index)
+      onMouseDown: event => {
+        if (event.button !== 0) return;
+        services.customProviderForm.focusIndex = CUSTOM_PROVIDER_DISCOVER_INDEX;
+        services.customProviderForm.selectedModelIndex = index;
+        callbacks.onCustomProviderModelToggle(index);
+      }
     });
     item.add(new core.TextRenderable(renderer, { content: marker, fg: marker === "●" ? COLORS.success : COLORS.muted, bg: background, width: 2, height: 1 }));
     item.add(new core.TextRenderable(renderer, { content: row.slice(2), fg: foreground, bg: background, height: 1, wrapMode: "none" }));
@@ -1395,11 +2143,9 @@ function addProviderAuthMethodDialog(core: OpenTuiCore, renderer: OpenTuiRendere
       paddingLeft: 3,
       paddingRight: 3,
       backgroundColor: background,
-      onMouseDown: () => {
-        services.pickerIndex = index;
-        callbacks.onProviderQueryChange();
-      },
-      onMouseUp: () => callbacks.onProviderAuthMethodSelect(index)
+      onMouseDown: event => {
+        if (event.button === 0) callbacks.onProviderAuthMethodSelect(index);
+      }
     });
     row.add(new core.TextRenderable(renderer, { content: method.label, fg: foreground, bg: background, height: 1, width: 52, wrapMode: "none" }));
     scroll.add(row);
@@ -1408,7 +2154,10 @@ function addProviderAuthMethodDialog(core: OpenTuiCore, renderer: OpenTuiRendere
 }
 
 function addModelSelectDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, runtime: RuntimeState, services: TuiServices, callbacks: ProviderDialogCallbacks): OpenTuiBox {
-  const title = services.modelProviderFilter && runtime.config ? sanitizeDisplayValue(runtime.config.providers[services.modelProviderFilter]?.displayName ?? services.modelProviderFilter, services.modelProviderFilter) : "Select model";
+  const agent = sanitizeDisplayValue(runtime.state.defaultAgent, runtime.activeAgentId ?? runtime.config?.defaultAgent ?? "agent");
+  const title = services.modelProviderFilter && runtime.config
+    ? `${sanitizeDisplayValue(runtime.config.providers[services.modelProviderFilter]?.displayName ?? services.modelProviderFilter, services.modelProviderFilter)} · ${agent}`
+    : `Select model for ${agent}`;
   const modal = addDialogFrame(core, renderer, parent, title);
   const models = modelPickerEntriesForProvider(runtime, services.modelProviderFilter);
   const viewportHeight = Math.max(1, Math.min(12, models.length + 1));
@@ -1446,11 +2195,9 @@ function addModelSelectDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, pare
       paddingLeft: 3,
       paddingRight: 3,
       backgroundColor: background,
-      onMouseDown: () => {
-        services.pickerIndex = index;
-        callbacks.onProviderQueryChange();
-      },
-      onMouseUp: () => callbacks.onModelSelect(index)
+      onMouseDown: event => {
+        if (event.button === 0) callbacks.onModelSelect(index);
+      }
     });
     row.add(new core.TextRenderable(renderer, { content: label, fg: foreground, bg: background, height: 1, width: 34, wrapMode: "none" }));
     row.add(new core.TextRenderable(renderer, { content: description, fg: muted, bg: background, height: 1, width: 18, wrapMode: "none" }));
@@ -1468,8 +2215,19 @@ function addProviderFlowDialog(core: OpenTuiCore, renderer: OpenTuiRenderer, par
   return undefined;
 }
 
-function addProviderPopupLayer(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiRoot, runtime: RuntimeState, services: TuiServices, callbacks: ProviderDialogCallbacks): OpenTuiDialogFocus | undefined {
+const PROVIDER_POPUP_BACKDROP_ID = "provider-popup-backdrop";
+const PROVIDER_POPUP_LAYER_ID = "provider-popup-layer";
+
+export function removeProviderPopupLayer(root: OpenTuiRoot): void {
+  for (const id of [PROVIDER_POPUP_LAYER_ID, PROVIDER_POPUP_BACKDROP_ID]) {
+    if (root.getRenderable(id)) root.remove(id);
+  }
+}
+
+export function addProviderPopupLayer(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiRoot, runtime: RuntimeState, services: TuiServices, callbacks: ProviderDialogCallbacks): OpenTuiDialogFocus | undefined {
+  removeProviderPopupLayer(parent);
   const backdrop = new core.BoxRenderable(renderer, {
+    id: PROVIDER_POPUP_BACKDROP_ID,
     position: "absolute",
     top: 0,
     left: 0,
@@ -1482,6 +2240,7 @@ function addProviderPopupLayer(core: OpenTuiCore, renderer: OpenTuiRenderer, par
   parent.add(backdrop);
 
   const layer = new core.BoxRenderable(renderer, {
+    id: PROVIDER_POPUP_LAYER_ID,
     position: "absolute",
     top: 0,
     left: 0,
@@ -1497,16 +2256,214 @@ function addProviderPopupLayer(core: OpenTuiCore, renderer: OpenTuiRenderer, par
   return addProviderFlowDialog(core, renderer, layer, runtime, services, callbacks);
 }
 
-function buildHome(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, services: TuiServices, onSubmit: (input: string) => void, onContentChange: (() => void) | undefined, callbacks: ProviderDialogCallbacks): OpenTuiTextarea {
+export function refreshProviderPopupLayer(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, services: TuiServices, callbacks: ProviderDialogCallbacks): OpenTuiDialogFocus | undefined {
+  const focus = addProviderPopupLayer(core, renderer, renderer.root, runtime, services, callbacks);
+  focus?.focus();
+  if (focus) renderer.focusRenderable(focus);
+  renderer.requestRender();
+  return focus;
+}
+
+export function closeProviderPopupLayer(renderer: OpenTuiRenderer, restoreTarget?: OpenTuiRenderable): void {
+  removeProviderPopupLayer(renderer.root);
+  if (restoreTarget && !restoreTarget.isDestroyed) {
+    restoreTarget.focus();
+    renderer.focusRenderable(restoreTarget);
+  }
+  renderer.requestRender();
+}
+
+function activeModelLabel(state: TuiState): string {
+  return sanitizeDisplayValue(state.modelDisplayName ?? state.model, "mock");
+}
+
+function mcpLoadedLabel(count: number | undefined, compact = false): string {
+  if (count === undefined || !Number.isFinite(count)) return compact ? "— MCP" : "— MCPs loaded";
+  const loaded = Math.max(0, Math.round(count));
+  return compact ? `${loaded} MCP` : `${loaded} MCP${loaded === 1 ? "" : "s"} loaded`;
+}
+
+interface ResponsiveChrome {
+  update(width: number): void;
+  setSummary?(summary: string): void;
+}
+
+function addAppHeader(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiRoot | OpenTuiBox, title: string, state: TuiState, services: TuiServices): ResponsiveChrome {
+  const header = new core.BoxRenderable(renderer, {
+    width: "100%",
+    height: 3,
+    flexShrink: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingLeft: 2,
+    paddingRight: 1,
+    border: ["bottom"],
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panel
+  });
+  parent.add(header);
+
+  const titleText = new core.TextRenderable(renderer, {
+    content: "",
+    fg: COLORS.text,
+    bg: COLORS.panel,
+    flexGrow: 1,
+    flexShrink: 1,
+    minWidth: 12,
+    height: 1,
+    wrapMode: "none"
+  });
+  header.add(titleText);
+  const summaryText = new core.TextRenderable(renderer, {
+    content: "",
+    fg: COLORS.muted,
+    bg: COLORS.panel,
+    width: 48,
+    height: 1,
+    wrapMode: "none",
+    onMouseDown: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      services.onSummary?.();
+    }
+  });
+  header.add(summaryText);
+  header.add(new core.TextRenderable(renderer, {
+    content: `v${STRONGCODE_VERSION}`,
+    fg: COLORS.primary,
+    bg: COLORS.panel,
+    width: 7,
+    height: 1,
+    wrapMode: "none"
+  }));
+
+  const update = (width: number) => {
+    const compactTokens = services.telemetry.totalTokens === undefined
+      ? "—"
+      : services.telemetry.totalTokens < 1000
+        ? `${Math.round(services.telemetry.totalTokens)}`
+        : `${(services.telemetry.totalTokens / 1000).toFixed(services.telemetry.totalTokens < 10_000 ? 1 : 0)}k`;
+    const compactCost = services.telemetry.costUsd === undefined ? "$—" : `$${services.telemetry.costUsd.toFixed(2)}`;
+    const narrow = width < 100;
+    const veryNarrow = width < 72;
+    titleText.content = `◆ STRONGCODE / ${compactSessionTitle(title, narrow ? 20 : 42)}`;
+    summaryText.content = narrow
+      ? veryNarrow
+        ? `  ${activeModelLabel(state).slice(0, 6)} ${compactTokens} F2`
+        : `  ${activeModelLabel(state).slice(0, 8)} · ${compactTokens} · ${compactCost} · F2`
+      : `  ${activeModelLabel(state)}  ${formatTokens(services.telemetry.totalTokens)} · ${formatCost(services.telemetry.costUsd)}  [ Summary F2 ]`;
+    summaryText.width = veryNarrow ? 16 : narrow ? 31 : 52;
+  };
+  update(renderer.width);
+  return { update };
+}
+
+function addAppFooter(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiRoot | OpenTuiBox, state: TuiState, services: TuiServices): ResponsiveChrome {
+  const footer = new core.BoxRenderable(renderer, {
+    width: "100%",
+    height: 1,
+    flexShrink: 0,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingLeft: 2,
+    paddingRight: 2
+  });
+  parent.add(footer);
+  const quickSummary = new core.TextRenderable(renderer, {
+    content: `Quick summary · ${sanitizeDisplayValue(state.workspace, ".")}`,
+    fg: COLORS.muted,
+    flexGrow: 1,
+    minWidth: 12,
+    height: 1,
+    wrapMode: "none"
+  });
+  footer.add(quickSummary);
+  const status = new core.TextRenderable(renderer, {
+    content: "",
+    fg: COLORS.muted,
+    width: 36,
+    height: 1,
+    wrapMode: "none"
+  });
+  footer.add(status);
+  const update = (width: number) => {
+    const narrow = width < 100;
+    const veryNarrow = width < 72;
+    status.content = veryNarrow
+      ? `  ${mcpLoadedLabel(services.telemetry.mcpServersLoaded, true)} · Ctrl+H`
+      : narrow
+        ? `  ${mcpLoadedLabel(services.telemetry.mcpServersLoaded)} · Ctrl+H`
+        : `  ${mcpLoadedLabel(services.telemetry.mcpServersLoaded)} · Ctrl+H commands`;
+    status.width = veryNarrow ? 18 : narrow ? 26 : 36;
+  };
+  update(renderer.width);
+  return {
+    update,
+    setSummary(summary: string) {
+      quickSummary.content = `Quick summary · ${compactSessionTitle(summary, 44)}`;
+    }
+  };
+}
+
+interface SessionSummaryElements {
+  rail: OpenTuiBox;
+  refresh(): void;
+}
+
+function addSessionSummary(core: OpenTuiCore, renderer: OpenTuiRenderer, parent: OpenTuiBox, runtime: RuntimeState, services: TuiServices): SessionSummaryElements {
+  const rail = new core.BoxRenderable(renderer, {
+    id: "session-summary-rail",
+    width: 32,
+    height: "100%",
+    flexShrink: 0,
+    flexDirection: "column",
+    backgroundColor: COLORS.panel,
+    border: ["left"],
+    borderColor: COLORS.border,
+    paddingTop: 1,
+    paddingLeft: 2,
+    paddingRight: 2
+  });
+  parent.add(rail);
+  addText(core, renderer, rail, "SESSION SUMMARY", { fg: COLORS.primary, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, rail, "──────────────────────────", { fg: COLORS.border, bg: COLORS.panel, height: 1 });
+  const detail = addText(core, renderer, rail, "", {
+    fg: COLORS.muted,
+    bg: COLORS.panel,
+    height: "auto",
+    wrapMode: "word",
+    onMouseDown: event => {
+      event.preventDefault();
+      event.stopPropagation();
+      services.onSummary?.();
+    }
+  });
+  const refresh = () => {
+    detail.content = summaryRailLines(services.telemetry).join("\n");
+  };
+  refresh();
+  return { rail, refresh };
+}
+
+export interface HomeView {
+  textarea: OpenTuiTextarea;
+  prompt: PromptElements;
+  resize(width: number): void;
+}
+
+export function buildHome(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, services: TuiServices, onSubmit: (input: string) => void, onContentChange: (() => void) | undefined, callbacks: ProviderDialogCallbacks): HomeView {
   const root = renderer.root;
   clearBox(root);
   root.flexDirection = "column";
   let dialogFocus: OpenTuiDialogFocus | undefined;
 
+  const header = addAppHeader(core, renderer, root, "Ready when you are", runtime.state, services);
+
   const container = new core.BoxRenderable(renderer, {
     flexGrow: 1,
+    width: "100%",
     minWidth: 0,
-    height: "100%",
+    minHeight: 0,
     flexDirection: "column",
     alignItems: "center",
     paddingLeft: 2,
@@ -1515,30 +2472,57 @@ function buildHome(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: Runtim
   root.add(container);
 
   const openCodeDialog = isOpenCodeDialogOverlay(services);
+  const homeContentWidth = Math.max(44, Math.min(HOME_PROMPT_WIDTH, renderer.width - 4));
   container.add(new core.BoxRenderable(renderer, { flexGrow: 1, minHeight: 0 }));
-  container.add(new core.BoxRenderable(renderer, { height: 4, minHeight: 0, flexShrink: 1 }));
-  for (const line of LOGO) {
-    addText(core, renderer, container, line, { fg: COLORS.primary, width: LOGO_WIDTH, height: 1 });
-  }
-  container.add(new core.BoxRenderable(renderer, { height: 2, minHeight: 0, flexShrink: 1 }));
+  const wideLogo = new core.BoxRenderable(renderer, {
+    width: STRONGCODE_WORDMARK_WIDTH,
+    height: STRONGCODE_WORDMARK_HEIGHT,
+    flexShrink: 0,
+    flexDirection: "column"
+  });
+  STRONGCODE_WORDMARK.left.forEach((left, index) => {
+    const row = new core.BoxRenderable(renderer, {
+      width: STRONGCODE_WORDMARK_WIDTH,
+      height: 1,
+      flexShrink: 0,
+      flexDirection: "row"
+    });
+    addText(core, renderer, row, decodeWordmarkLine(left), {
+      fg: COLORS.muted,
+      width: STRONGCODE_WORDMARK_LEFT_WIDTH,
+      height: 1,
+      wrapMode: "none"
+    });
+    row.add(new core.BoxRenderable(renderer, { width: STRONGCODE_WORDMARK_GAP, height: 1, flexShrink: 0 }));
+    addText(core, renderer, row, decodeWordmarkLine(STRONGCODE_WORDMARK.right[index] ?? ""), {
+      fg: COLORS.primary,
+      width: STRONGCODE_WORDMARK_RIGHT_WIDTH,
+      height: 1,
+      wrapMode: "none"
+    });
+    wideLogo.add(row);
+  });
+  container.add(wideLogo);
+  const compactLogo = addText(core, renderer, container, "◆ STRONGCODE", { fg: COLORS.primary, width: 12, height: 1, wrapMode: "none" });
+  wideLogo.visible = renderer.width >= STRONGCODE_WORDMARK_MIN_VIEWPORT;
+  compactLogo.visible = renderer.width < STRONGCODE_WORDMARK_MIN_VIEWPORT;
+  container.add(new core.BoxRenderable(renderer, { height: 1, minHeight: 0, flexShrink: 1 }));
+  let inlineOverlay: OpenTuiBox | undefined;
   if (services.startupOverlay !== "none" || services.dialogs.active()) {
     if (services.startupOverlay !== "slashCommands" && !openCodeDialog) {
-      const overlay = new core.BoxRenderable(renderer, { width: HOME_PROMPT_WIDTH, flexDirection: "column", border: true, borderColor: COLORS.secondary, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, flexShrink: 0 });
+      const overlay = new core.BoxRenderable(renderer, { width: homeContentWidth, flexDirection: "column", border: true, borderColor: COLORS.secondary, paddingLeft: 1, paddingRight: 1, paddingTop: 1, paddingBottom: 1, flexShrink: 0 });
       container.add(overlay);
+      inlineOverlay = overlay;
       addMultilineText(core, renderer, overlay, renderHomeOverlayText(runtime, services), { fg: COLORS.text, height: 1 });
     }
   }
   if (services.startupOverlay === "slashCommands") {
-    addSlashCommandOverlay(core, renderer, container, services);
+    inlineOverlay = addSlashCommandOverlay(core, renderer, container, services, callbacks);
   }
-  const prompt = createPrompt(core, renderer, container, runtime.state, services.promptDraft, onSubmit, onContentChange);
+  const prompt = createPrompt(core, renderer, container, runtime.state, services.controls, services.promptDraft, onSubmit, onContentChange, homeContentWidth);
   const textarea = prompt.textarea;
   container.add(new core.BoxRenderable(renderer, { flexGrow: 1, minHeight: 1 }));
-
-  const footer = new core.BoxRenderable(renderer, { width: "100%", height: 1, flexDirection: "row", justifyContent: "space-between", paddingLeft: 1, paddingRight: 1, flexShrink: 0 });
-  footer.add(new core.TextRenderable(renderer, { content: sanitizeDisplayValue(runtime.state.workspace, "."), fg: COLORS.muted, width: 32 }));
-  footer.add(new core.TextRenderable(renderer, { content: `• 0 LSP   ⊙ 0 MCP`, fg: COLORS.text, width: 30 }));
-  container.add(footer);
+  const footer = addAppFooter(core, renderer, root, runtime.state, services);
 
   if (openCodeDialog) {
     dialogFocus = addProviderPopupLayer(core, renderer, root, runtime, services, callbacks);
@@ -1552,45 +2536,236 @@ function buildHome(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: Runtim
     renderer.focusRenderable(textarea);
   }
   renderer.requestRender();
-  return textarea;
+  const resize = (width: number) => {
+    const contentWidth = Math.max(44, Math.min(HOME_PROMPT_WIDTH, width - 4));
+    wideLogo.visible = width >= STRONGCODE_WORDMARK_MIN_VIEWPORT;
+    compactLogo.visible = width < STRONGCODE_WORDMARK_MIN_VIEWPORT;
+    prompt.resize(contentWidth);
+    if (inlineOverlay) {
+      inlineOverlay.width = contentWidth;
+      inlineOverlay.maxWidth = contentWidth;
+    }
+    header.update(width);
+    footer.update(width);
+    renderer.requestRender();
+  };
+  return { textarea, prompt, resize };
 }
 
-function buildSession(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, onSubmit: (input: string, scroll: OpenTuiScrollBox) => void): { textarea: OpenTuiTextarea; scroll: OpenTuiScrollBox } {
+export interface SessionView {
+  textarea: OpenTuiTextarea;
+  scroll: OpenTuiScrollBox;
+  promptMeta: OpenTuiText;
+  prompt: PromptElements;
+  summary: SessionSummaryElements;
+  header: ResponsiveChrome;
+  footer: ResponsiveChrome;
+  resize(width: number): void;
+}
+
+export function buildSession(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, services: TuiServices, title: string, onSubmit: (input: string, scroll: OpenTuiScrollBox) => void): SessionView {
   clearBox(renderer.root);
-  renderer.root.flexDirection = "row";
+  renderer.root.flexDirection = "column";
+
+  const header = addAppHeader(core, renderer, renderer.root, title, runtime.state, services);
+
+  const body = new core.BoxRenderable(renderer, { width: "100%", flexGrow: 1, minHeight: 0, minWidth: 0, flexDirection: "row" });
+  renderer.root.add(body);
 
   const main = new core.BoxRenderable(renderer, { flexGrow: 1, minWidth: 0, height: "100%", paddingLeft: 2, paddingRight: 2, paddingBottom: 1, flexDirection: "column", gap: 1 });
-  renderer.root.add(main);
+  body.add(main);
 
   const scroll = new core.ScrollBoxRenderable(renderer, {
     id: "session-scroll",
     flexGrow: 1,
     minHeight: 0,
+    scrollY: true,
     stickyScroll: true,
     stickyStart: "bottom",
+    scrollAcceleration: new core.MacOSScrollAccel(),
     verticalScrollbarOptions: {
       visible: true,
       trackOptions: { backgroundColor: COLORS.element, foregroundColor: COLORS.border }
     }
   });
   main.add(scroll);
-  appendMessage(core, renderer, scroll, "system", "No messages in session.", runtime.state);
-  const textarea = createPrompt(core, renderer, main, runtime.state, "", input => onSubmit(input, scroll)).textarea;
+  const summaryVisible = renderer.width >= 110;
+  const promptWidth = Math.max(44, renderer.width - 4 - (summaryVisible ? 32 : 0));
+  const prompt = createPrompt(core, renderer, main, runtime.state, services.controls, "", input => onSubmit(input, scroll), undefined, promptWidth, "/model list · Tab agents · Ctrl+H commands");
+  const textarea = prompt.textarea;
 
-  const sidebar = new core.BoxRenderable(renderer, { width: 42, height: "100%", backgroundColor: COLORS.panel, paddingTop: 1, paddingBottom: 1, paddingLeft: 2, paddingRight: 2, flexDirection: "column" });
-  renderer.root.add(sidebar);
-  const sidebarScroll = new core.ScrollBoxRenderable(renderer, { flexGrow: 1, scrollY: true });
-  sidebar.add(sidebarScroll);
-  addText(core, renderer, sidebarScroll, "local", { fg: COLORS.text, height: 1 });
-  addText(core, renderer, sidebarScroll, sanitizeDisplayValue(runtime.state.workspace, "."), { fg: COLORS.muted, height: 1 });
-  addText(core, renderer, sidebarScroll, `Active model: ${sanitizeDisplayValue(runtime.state.modelDisplayName ?? runtime.state.model, "mock")}`, { fg: COLORS.primary, height: 1 });
-  addText(core, renderer, sidebarScroll, `Provider: ${sanitizeDisplayValue(runtime.state.providerDisplayName ?? runtime.state.provider, "local")}`, { fg: COLORS.muted, height: 1 });
-  sidebar.add(new core.TextRenderable(renderer, { content: "• StrongCode 0.1.0", fg: COLORS.muted, height: 1 }));
+  const summary = addSessionSummary(core, renderer, body, runtime, services);
+  summary.rail.visible = summaryVisible;
+  const footer = addAppFooter(core, renderer, renderer.root, runtime.state, services);
+
+  const resize = (width: number) => {
+    const showSummary = width >= 110;
+    summary.rail.visible = showSummary;
+    prompt.resize(Math.max(44, width - 4 - (showSummary ? 32 : 0)));
+    header.update(width);
+    footer.update(width);
+    renderer.requestRender();
+  };
 
   textarea.focus();
   renderer.focusRenderable(textarea);
   renderer.requestRender();
-  return { textarea, scroll };
+  return { textarea, scroll, promptMeta: prompt.meta, prompt, summary, header, footer, resize };
+}
+
+function removeHelpOverlay(root: OpenTuiRoot): void {
+  for (const id of ["help-layer", "help-backdrop"]) {
+    if (root.getRenderable(id)) root.remove(id);
+  }
+}
+
+function addHelpOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer): OpenTuiBox {
+  removeHelpOverlay(renderer.root);
+  const backdrop = new core.BoxRenderable(renderer, {
+    id: "help-backdrop",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    backgroundColor: COLORS.background,
+    opacity: 0.8,
+    zIndex: 200
+  });
+  renderer.root.add(backdrop);
+
+  const layer = new core.BoxRenderable(renderer, {
+    id: "help-layer",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 210
+  });
+  renderer.root.add(layer);
+
+  const modal = new core.BoxRenderable(renderer, {
+    width: Math.max(36, Math.min(82, renderer.width - 4)),
+    height: Math.max(12, Math.min(30, renderer.height - 4)),
+    flexDirection: "column",
+    backgroundColor: COLORS.panel,
+    border: true,
+    borderColor: COLORS.primary,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    paddingRight: 2,
+    focusable: true
+  });
+  layer.add(modal);
+  addText(core, renderer, modal, "COMMANDS & SHORTCUTS", { fg: COLORS.primary, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, modal, "Ctrl+H or F1 closes · Esc returns to chat", { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  const scroll = new core.ScrollBoxRenderable(renderer, {
+    flexGrow: 1,
+    minHeight: 0,
+    marginTop: 1,
+    scrollY: true,
+    focusable: true,
+    verticalScrollbarOptions: { visible: true, trackOptions: { backgroundColor: COLORS.element, foregroundColor: COLORS.border } }
+  });
+  modal.add(scroll);
+  for (const line of commandHelpLines()) {
+    const section = line.length > 0 && line === line.toUpperCase() && !line.startsWith("  ");
+    addText(core, renderer, scroll, line || " ", { fg: section ? COLORS.primary : COLORS.text, bg: COLORS.panel, height: 1, wrapMode: "none" });
+  }
+  scroll.focus();
+  renderer.focusRenderable(scroll);
+  renderer.requestRender();
+  return scroll;
+}
+
+function removeSummaryOverlay(root: OpenTuiRoot): void {
+  for (const id of ["summary-layer", "summary-backdrop"]) {
+    if (root.getRenderable(id)) root.remove(id);
+  }
+}
+
+export function addSummaryOverlay(core: OpenTuiCore, renderer: OpenTuiRenderer, runtime: RuntimeState, services: TuiServices, title: string): OpenTuiBox {
+  removeSummaryOverlay(renderer.root);
+  const backdrop = new core.BoxRenderable(renderer, {
+    id: "summary-backdrop",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    backgroundColor: COLORS.background,
+    opacity: 0.8,
+    zIndex: 200
+  });
+  renderer.root.add(backdrop);
+
+  const layer = new core.BoxRenderable(renderer, {
+    id: "summary-layer",
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 210
+  });
+  renderer.root.add(layer);
+
+  const modal = new core.BoxRenderable(renderer, {
+    width: Math.max(36, Math.min(72, renderer.width - 4)),
+    height: Math.max(12, Math.min(22, renderer.height - 4)),
+    flexDirection: "column",
+    backgroundColor: COLORS.panel,
+    border: true,
+    borderColor: COLORS.secondary,
+    paddingTop: 1,
+    paddingBottom: 1,
+    paddingLeft: 2,
+    paddingRight: 2,
+    focusable: true
+  });
+  layer.add(modal);
+  addText(core, renderer, modal, "SESSION SUMMARY", { fg: COLORS.primary, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, modal, compactSessionTitle(title, 54), { fg: COLORS.text, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, modal, "F2, Esc, or /summary closes", { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  const body = new core.ScrollBoxRenderable(renderer, {
+    flexGrow: 1,
+    minHeight: 0,
+    marginTop: 1,
+    scrollY: true,
+    focusable: true,
+    verticalScrollbarOptions: { visible: true, trackOptions: { backgroundColor: COLORS.element, foregroundColor: COLORS.border } }
+  });
+  modal.add(body);
+  addText(core, renderer, body, "────────────────────────────────────────────────────────", { fg: COLORS.border, bg: COLORS.panel, height: 1 });
+  for (const line of summaryDetailLines(services.telemetry)) {
+    addText(core, renderer, body, line || " ", { fg: line === "FIRST REQUEST" ? COLORS.primary : COLORS.text, bg: COLORS.panel, height: "auto", wrapMode: "word" });
+  }
+  addText(core, renderer, body, "", { bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Agent       ${sanitizeDisplayValue(runtime.state.defaultAgent, "default")}`, { fg: COLORS.text, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Model       ${activeModelLabel(runtime.state)}`, { fg: COLORS.text, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, "", { bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Reasoning   ${reasoningLabel(services.controls)}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Fast mode   ${fastModeLabel(services.controls)}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, "", { bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Tokens      ${formatTokens(services.telemetry.totalTokens)}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Cost        ${formatCost(services.telemetry.costUsd)}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Tools       ${services.telemetry.toolCalls}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `Skills      ${services.telemetry.skillsRead ?? "—"}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `MCP loaded  ${services.telemetry.mcpServersLoaded ?? "—"}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, `MCP used    ${services.telemetry.mcpServersUsed ?? "—"}`, { fg: COLORS.muted, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, "", { bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, "LATEST TURN", { fg: COLORS.primary, bg: COLORS.panel, height: 1 });
+  addText(core, renderer, body, services.lastReceipt ? turnReceiptLine(services.lastReceipt) : "No completed turns yet.", { fg: COLORS.muted, bg: COLORS.panel, height: "auto", wrapMode: "word" });
+  body.focus();
+  renderer.focusRenderable(body);
+  renderer.requestRender();
+  return body;
 }
 
 async function loadOpenTuiCore(): Promise<OpenTuiCore> {
@@ -1608,7 +2783,11 @@ async function loadOpenTuiKeymapAddons(): Promise<OpenTuiKeymapAddons> {
   return dynamicImport("@opentui/keymap/addons/opentui");
 }
 
-export async function runTui(input: NodeJS.ReadableStream = process.stdin, output: NodeJS.WritableStream = process.stdout): Promise<void> {
+export async function runTui(
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+  createRenderer?: OpenTuiCore["createCliRenderer"]
+): Promise<void> {
   if (!shouldUseOpenTui(input, output)) {
     await runFallbackTui(input, output);
     return;
@@ -1620,13 +2799,20 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
   const core = await loadOpenTuiCore();
   const keymapModule = await loadOpenTuiKeymap();
   const keymapAddons = await loadOpenTuiKeymapAddons();
-  const runtime = await loadRuntimeState().catch(error => {
-    const state: TuiState = { provider: "N/A", defaultAgent: "N/A", configPath: DEFAULT_CONFIG_PATH, configMissing: true };
-    return { state, error } as RuntimeState & { error: unknown };
+  const currentSessionId = `session-${Date.now()}`;
+  const runtime = await loadRuntimeState(currentSessionId).catch(error => {
+    const state: TuiState = { provider: "N/A", defaultAgent: "N/A", configPath: resolveConfigPath(), configMissing: true };
+    return { state, currentSessionId, error } as RuntimeState & { error: unknown };
   });
-  const services = await createTuiServices(await loadTuiConfig(), runtime.state.dataDir);
+  const servicesDataDir = runtime.config
+    ? resolveRuntimeAuthDataDir(
+      runtime.state.configPath,
+      path.resolve(path.dirname(path.resolve(runtime.state.configPath)), runtime.config.dataDir)
+    )
+    : undefined;
+  const services = await createTuiServices(await loadTuiConfig(), servicesDataDir, runtime.state, runtime.trustedConfig === true);
 
-  const renderer = await core.createCliRenderer({
+  const renderer = await (createRenderer ?? core.createCliRenderer)({
     exitOnCtrlC: false,
     useMouse: services.tuiConfig.mouse,
     enableMouseMovement: services.tuiConfig.mouse,
@@ -1639,14 +2825,79 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
   const keymap = keymapModule.createDefaultOpenTuiKeymap(renderer);
   const unregisterBaseLayout = keymapAddons.registerBaseLayoutFallback(keymap);
   const unregisterTextareaLayer = keymapAddons.registerManagedTextareaLayer(keymap, renderer, {
-    bindings: [{ key: "return", cmd: "input.submit", desc: "Submit prompt", group: "Text Editing" }]
+    bindings: [
+      { key: "shift+return", cmd: "input.newline", desc: "Insert new line", group: "Text Editing" },
+      { key: "return", cmd: "input.submit", desc: "Submit prompt", group: "Text Editing" }
+    ]
   });
+  const questionSurface: QuestionSurfaceController | undefined = runtime.questionBroker
+    ? mountQuestionSurface({
+        core,
+        renderer,
+        keymap,
+        theme: services.tuiConfig.theme,
+        broker: runtime.questionBroker,
+        simplifier: runtime.questionSimplifier
+      })
+    : undefined;
 
   let activeScroll: OpenTuiScrollBox | undefined;
+  let activeHomeView: HomeView | undefined;
+  let activeSessionView: SessionView | undefined;
+  let sessionTitle = "New session";
+  let textarea!: OpenTuiTextarea;
+  let stopActivePending: (() => void) | undefined;
+  let focusBeforeHelp: OpenTuiRenderable | undefined;
+  let focusBeforeSummary: OpenTuiRenderable | undefined;
+  let focusBeforeProviderPopup: OpenTuiRenderable | undefined;
   let customProviderDiscoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let customProviderDiscoveryRequestId = 0;
+  const turnOperations = createExclusiveOperationGate();
+  const mutationOperations = createExclusiveOperationGate();
+  const modelRefreshes = createModelRefreshGate();
+  const scrollTranscript = (action: "page-up" | "page-down" | "start" | "end" | "step-up" | "step-down"): boolean => {
+    if (!activeScroll || services.startupOverlay !== "none" || services.helpOpen || services.summaryOpen) return false;
+    if (action === "start") activeScroll.scrollTo(0);
+    else if (action === "end") activeScroll.scrollTo(activeScroll.scrollHeight);
+    else {
+      const direction = action === "page-up" || action === "step-up" ? -1 : 1;
+      const distance = action === "page-up" || action === "page-down" ? Math.max(3, activeScroll.height - 2) : 3;
+      activeScroll.scrollBy({ x: 0, y: direction * distance });
+    }
+    renderer.requestRender();
+    return true;
+  };
+  const focusReasoningDisclosure = (): boolean => {
+    if (!activeSessionView || services.startupOverlay !== "none" || services.helpOpen || services.summaryOpen || services.dialogs.active()) return false;
+    const headers = reasoningDisclosureHeaders(renderer.root).reverse();
+    const currentFocus = renderer.currentFocusedRenderable;
+    const currentIndex = currentFocus ? headers.indexOf(currentFocus) : -1;
+    const target = headers[currentIndex === -1 ? 0 : (currentIndex + 1) % headers.length];
+    if (!target) return false;
+    target.focus();
+    renderer.focusRenderable(target);
+    renderer.requestRender();
+    return true;
+  };
+  const unregisterTranscriptNavigationLayer = keymap.registerLayer({
+    priority: 300,
+    commands: [
+      { name: "transcript.page.up", desc: "Scroll transcript up", run: () => scrollTranscript("page-up") },
+      { name: "transcript.page.down", desc: "Scroll transcript down", run: () => scrollTranscript("page-down") },
+      { name: "transcript.start", desc: "Go to oldest transcript message", run: () => scrollTranscript("start") },
+      { name: "transcript.end", desc: "Go to latest transcript message", run: () => scrollTranscript("end") }
+    ],
+    bindings: [
+      { key: "pageup", cmd: "transcript.page.up" },
+      { key: "pagedown", cmd: "transcript.page.down" },
+      { key: "ctrl+home", cmd: "transcript.start" },
+      { key: "ctrl+end", cmd: "transcript.end" }
+    ]
+  });
   const exit = () => {
     clearCustomProviderDiscoveryTimer();
+    stopActivePending?.();
+    stopActivePending = undefined;
     if (!renderer.isDestroyed) renderer.destroy();
   };
   const clearCustomProviderDiscoveryTimer = (): void => {
@@ -1667,9 +2918,125 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     copyCurrentSelection();
   };
 
-  const handleSubmit = async (input: string, scroll?: OpenTuiScrollBox): Promise<void> => {
-    if (!scroll && input.startsWith("/")) {
-      const sessionView = buildSession(core, renderer, runtime, (value, sessionScroll) => void handleSubmit(value, sessionScroll));
+  const closeHelp = (): boolean => {
+    if (!services.helpOpen) return false;
+    services.helpOpen = false;
+    removeHelpOverlay(renderer.root);
+    const target = focusBeforeHelp && !focusBeforeHelp.isDestroyed
+      ? focusBeforeHelp
+      : activeSessionView?.textarea ?? textarea;
+    focusBeforeHelp = undefined;
+    target?.focus();
+    if (target) renderer.focusRenderable(target);
+    renderer.requestRender();
+    return true;
+  };
+  const closeSummary = (): boolean => {
+    if (!services.summaryOpen) return false;
+    services.summaryOpen = false;
+    removeSummaryOverlay(renderer.root);
+    const target = focusBeforeSummary && !focusBeforeSummary.isDestroyed
+      ? focusBeforeSummary
+      : activeSessionView?.textarea ?? textarea;
+    focusBeforeSummary = undefined;
+    target?.focus();
+    if (target) renderer.focusRenderable(target);
+    renderer.requestRender();
+    return true;
+  };
+  const toggleHelp = (): void => {
+    if (closeHelp()) return;
+    if (services.summaryOpen) closeSummary();
+    focusBeforeHelp = renderer.currentFocusedRenderable ?? undefined;
+    services.helpOpen = true;
+    addHelpOverlay(core, renderer);
+  };
+  const toggleSummary = (): void => {
+    if (closeSummary()) return;
+    if (services.helpOpen) closeHelp();
+    focusBeforeSummary = renderer.currentFocusedRenderable ?? undefined;
+    services.summaryOpen = true;
+    addSummaryOverlay(core, renderer, runtime, services, sessionTitle);
+  };
+  services.onSummary = toggleSummary;
+  const updateSessionReceipt = (receipt: TurnReceipt) => {
+    if (!activeSessionView) return;
+    activeSessionView.summary.refresh();
+    activeSessionView.footer.setSummary?.(turnReceiptLine(receipt));
+    if (services.summaryOpen) addSummaryOverlay(core, renderer, runtime, services, sessionTitle);
+    renderer.requestRender();
+  };
+  const refreshSessionTelemetry = async (): Promise<void> => {
+    const sessionId = runtime.currentSessionId;
+    if (!runtime.sessionStore || !sessionId) return;
+    const stored = await runtime.sessionStore.readOrEmpty(sessionId);
+    if (!stored.ok) return;
+    const projected = projectSessionTelemetry(stored.value.events);
+    const telemetry = { ...services.telemetry };
+    delete telemetry.totalTokens;
+    delete telemetry.costUsd;
+    delete telemetry.costProvenance;
+    delete telemetry.contextInputTokens;
+    delete telemetry.contextWindowTokens;
+    services.telemetry = { ...telemetry, ...projected };
+    activeSessionView?.header.update(renderer.width);
+    activeSessionView?.summary.refresh();
+    if (services.summaryOpen) addSummaryOverlay(core, renderer, runtime, services, sessionTitle);
+  };
+  const reportBusy = (targetScroll = activeScroll): void => {
+    if (targetScroll) appendMessage(core, renderer, targetScroll, "system", ACTIVE_TURN_BUSY_MESSAGE, runtime.state);
+  };
+  const operationIsBusy = (): boolean => services.turnRunning || turnOperations.isActive() || mutationOperations.isActive();
+  const acquireMutationOperation = (report = true): ExclusiveOperationLease | undefined => {
+    if (services.turnRunning || turnOperations.isActive()) {
+      if (report) reportBusy();
+      return undefined;
+    }
+    const lease = mutationOperations.acquire();
+    if (!lease && report) reportBusy();
+    return lease;
+  };
+
+  const handleSubmit = async (input: string, scroll?: OpenTuiScrollBox, approvedPlan?: ApprovedPlan): Promise<void> => {
+    const parsedCommand = parseSlashCommand(input);
+    const fullRoute = fullTuiRouteForInput(input);
+    let mutationLease = parsedCommand && !slashCommandAllowedDuringTurn(parsedCommand)
+      ? mutationOperations.acquire()
+      : undefined;
+    if (parsedCommand && !slashCommandAllowedDuringTurn(parsedCommand) && !mutationLease) {
+      reportBusy(scroll ?? activeScroll);
+      return;
+    }
+    const releaseMutationLease = (): void => {
+      const lease = mutationLease;
+      if (!lease) return;
+      mutationOperations.release(lease);
+      mutationLease = undefined;
+    };
+    const submitNestedTurn = (nestedInput: string, approvedPlan?: ApprovedPlan): Promise<void> => {
+      const submitTurn = services.submitTurn;
+      if (!submitTurn) return Promise.resolve();
+      const lease = mutationLease;
+      if (!lease) return submitTurn(nestedInput, approvedPlan);
+      return releaseOperationAndSubmit(mutationOperations, lease, () => {
+        if (mutationLease === lease) mutationLease = undefined;
+        return submitTurn(nestedInput, approvedPlan);
+      });
+    };
+    try {
+    const busyScroll = scroll ?? activeScroll;
+    if ((services.turnRunning || turnOperations.isActive()) && (!parsedCommand || !slashCommandAllowedDuringTurn(parsedCommand))) {
+      if (busyScroll) appendMessage(core, renderer, busyScroll, "system", ACTIVE_TURN_BUSY_MESSAGE, runtime.state);
+      return;
+    }
+    if (fullRoute && await openFullTuiRoute(input)) {
+      return;
+    }
+    if (!scroll && parsedCommand) {
+      const sessionView = buildSession(core, renderer, runtime, services, sessionTitle, (value, sessionScroll) => void handleSubmit(value, sessionScroll));
+      activeHomeView = undefined;
+      activeSessionView = sessionView;
+      textarea = sessionView.textarea;
       activeScroll = sessionView.scroll;
       scroll = sessionView.scroll;
       sessionView.textarea.focus();
@@ -1677,66 +3044,143 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     const append = (role: "assistant" | "system", text: string) => {
       if (scroll) appendMessage(core, renderer, scroll, role, text, runtime.state);
     };
-    if (await handleSystemCommand(input, runtime, services, append, exit)) {
-      return;
-    }
-    if (input.startsWith("/connect ")) {
-      if (!scroll) return;
-      const response = await handleConnectCommand(input, {
-        config: runtime.config,
-        configPath: DEFAULT_CONFIG_PATH,
-        state: runtime.state,
-        noColor: true,
-        onConfigUpdated: config => {
-          refreshRuntimeFromConfig(runtime, config);
-          services.toasts.push("success", "Provider connected.");
-        }
-      });
-      await reloadProviderAuth(runtime, services);
-      appendMessage(core, renderer, scroll, "system", response, runtime.state);
-      return;
-    }
-    if (input.startsWith("/")) {
-      if (scroll) appendMessage(core, renderer, scroll, "system", clipDisplayLine(`Unknown command: ${input}`), runtime.state);
+    if (parsedCommand && parsedCommand.command !== "unknown" && await handleSystemCommand(input, runtime, services, append, exit, submitNestedTurn)) return;
+    if (parsedCommand?.command === "unknown") {
+      if (scroll) appendMessage(core, renderer, scroll, "system", clipDisplayLine(`Unknown command: ${parsedCommand.input}`), runtime.state);
       return;
     }
 
     if (!activeScroll) {
-      const sessionView = buildSession(core, renderer, runtime, (value, sessionScroll) => void handleSubmit(value, sessionScroll));
+      sessionTitle = compactSessionTitle(input);
+      const sessionView = buildSession(core, renderer, runtime, services, sessionTitle, (value, sessionScroll) => void handleSubmit(value, sessionScroll));
+      activeHomeView = undefined;
+      activeSessionView = sessionView;
+      textarea = sessionView.textarea;
       activeScroll = sessionView.scroll;
       sessionView.textarea.focus();
     }
 
     const targetScroll = scroll ?? activeScroll;
     if (!targetScroll) return;
-    services.history.add(input);
-    await services.historyStore?.save(services.history);
-    appendMessage(core, renderer, targetScroll, "user", input, runtime.state);
-    if (!runtime.runner || !runtime.agent) {
-      appendMessage(core, renderer, targetScroll, "system", "Config missing. Run 'strongcode init' first.", runtime.state);
+    if (mutationOperations.isActive()) {
+      reportBusy(targetScroll);
       return;
     }
-    const result = await runtime.runner.run(runtime.agent, input, `session-${Date.now()}`);
-    appendMessage(core, renderer, targetScroll, result.ok ? "assistant" : "system", result.ok ? result.value.response : String(result.error), runtime.state);
-  };
-
-  let textarea: OpenTuiTextarea;
-  const openHomeOverlayForCommand = async (value: string): Promise<boolean> => {
-    const overlay = exactHomeCommandOverlay(value);
-    if (!overlay) return false;
-    services.modelProviderFilter = undefined;
-    services.providerQuery = "";
-    services.authInputDraft = "";
-    if (overlay === "models") {
-      const failures = await refreshAuthenticatedProviderModels(runtime);
-      await reloadProviderAuth(runtime, services);
-      failures.forEach(failure => services.toasts.push("error", clipDisplayLine(failure)));
+    const startedAt = Date.now();
+    const turnState = { ...runtime.state };
+    const receiptLabels = snapshotTurnReceiptLabels(turnState);
+    const turnRunner = runtime.runner;
+    const turnAgent = runtime.agent;
+    if (!turnRunner || !turnAgent) {
+      const receipt: TurnReceipt = {
+        status: "failed",
+        agent: receiptLabels.agent,
+        model: receiptLabels.model,
+        durationMs: Date.now() - startedAt,
+        toolCalls: 0,
+        skillsRead: undefined,
+        mcpServersUsed: undefined
+      };
+      services.lastReceipt = receipt;
+      updateSessionReceipt(receipt);
+      appendMessage(core, renderer, targetScroll, "assistant", "Config missing. Run 'strongcode init' first.", turnState, receipt);
+      return;
     }
-    services.pickerIndex = overlay === "providers" ? selectedProviderIndex(runtime) : selectedModelIndex(runtime);
-    showOverlay(overlay);
-    return true;
+    const planningTurn = turnAgent.name === "jbp";
+    if (planningTurn) runtime.jbpPlanReceipt = undefined;
+    const turnLease = acquireTurnLease(turnOperations, mutationOperations, services.turnRunning);
+    if (!turnLease) {
+      reportBusy(targetScroll);
+      return;
+    }
+    services.turnRunning = true;
+    let pending: ReturnType<typeof appendPendingMessage> | undefined;
+    try {
+      services.history.add(input);
+      await services.historyStore?.save(services.history);
+      appendMessage(core, renderer, targetScroll, "user", input, turnState);
+      pending = appendPendingMessage(core, renderer, targetScroll, turnState, startedAt);
+      stopActivePending = pending.stop;
+      const result = approvedPlan
+        ? await turnRunner.runApprovedPlan(turnAgent, input, currentSessionId, approvedPlan)
+        : await turnRunner.run(turnAgent, input, currentSessionId);
+      await refreshSessionTelemetry();
+      if (planningTurn) runtime.jbpPlanReceipt = result.ok ? result.value.planReceipt : undefined;
+      const receipt: TurnReceipt = {
+        status: result.ok ? "finished" : "failed",
+        agent: receiptLabels.agent,
+        model: receiptLabels.model,
+        durationMs: Date.now() - startedAt,
+        toolCalls: result.ok ? result.value.toolExecutions.length : 0,
+        skillsRead: undefined,
+        mcpServersUsed: undefined
+      };
+      services.telemetry.toolCalls += receipt.toolCalls;
+      services.lastReceipt = receipt;
+      if (renderer.isDestroyed) return;
+      updateSessionReceipt(receipt);
+      appendMessage(core, renderer, targetScroll, "assistant", result.ok ? result.value.response : String(result.error), turnState, receipt, result.ok ? result.value.reasoning : undefined);
+    } catch (error) {
+      if (renderer.isDestroyed) return;
+      const receipt: TurnReceipt = {
+        status: "failed",
+        agent: receiptLabels.agent,
+        model: receiptLabels.model,
+        durationMs: Date.now() - startedAt,
+        toolCalls: 0,
+        skillsRead: undefined,
+        mcpServersUsed: undefined
+      };
+      services.lastReceipt = receipt;
+      updateSessionReceipt(receipt);
+      appendMessage(core, renderer, targetScroll, "assistant", error instanceof Error ? error.message : String(error), turnState, receipt);
+    } finally {
+      pending?.stop();
+      if (pending && stopActivePending === pending.stop) stopActivePending = undefined;
+      services.turnRunning = false;
+      turnOperations.release(turnLease);
+    }
+    } finally {
+      releaseMutationLease();
+    }
   };
-  const executeCustomProviderModelDiscovery = async (requestId = ++customProviderDiscoveryRequestId): Promise<void> => {
+  services.submitTurn = (input, approvedPlan) => handleSubmit(input, activeScroll, approvedPlan);
+  const openFullTuiRoute = async (value: string): Promise<boolean> => {
+    const route = fullTuiRouteForInput(value);
+    if (!route) return false;
+    switch (route) {
+      case "help":
+        toggleHelp();
+        return true;
+      case "summary":
+        toggleSummary();
+        return true;
+      case "providers":
+      case "models": {
+        services.modelProviderFilter = undefined;
+        services.providerQuery = "";
+        services.authInputDraft = "";
+        services.pickerIndex = route === "providers" ? selectedProviderIndex(runtime) : selectedModelIndex(runtime);
+        const modelRefresh = showOverlay(route);
+        if (route === "models" && !services.turnRunning && modelRefresh) {
+          const failures = await refreshAuthenticatedProviderModels(runtime);
+          if (!modelRefreshes.isCurrent(modelRefresh, services.startupOverlay)) return true;
+          await reloadProviderAuth(runtime, services);
+          if (!modelRefreshes.isCurrent(modelRefresh, services.startupOverlay)) return true;
+          failures.forEach(failure => services.toasts.push("error", clipDisplayLine(failure)));
+          services.pickerIndex = selectedModelIndex(runtime);
+          refreshProviderSurface();
+        }
+        return true;
+      }
+      default:
+        return assertNeverCommand(route);
+    }
+  };
+  const executeCustomProviderModelDiscovery = async (requestId = ++customProviderDiscoveryRequestId, explicit = true): Promise<void> => {
+    const mutationLease = acquireMutationOperation(explicit);
+    if (!mutationLease) return;
+    try {
     clearCustomProviderDiscoveryTimer();
     if (requestId !== customProviderDiscoveryRequestId) return;
     const form = services.customProviderForm;
@@ -1745,24 +3189,39 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     const apiKey = form.apiKey.trim();
     if (!baseUrl || !apiKey) {
       services.customProviderForm.discovery = { status: "error", models: [], selectedModels: [], error: "Enter Base URL and API key first." };
-      rebuildHome();
+      refreshProviderSurface();
       return;
     }
     if (!isValidCustomProviderId(providerId)) {
       services.customProviderForm.discovery = { status: "error", models: [], selectedModels: [], error: "Provider ID must be lowercase letters, numbers, hyphens, or underscores." };
-      rebuildHome();
+      refreshProviderSurface();
+      return;
+    }
+    if (!isAvailableCustomProviderId(runtime.config, providerId, services.authProviderId ?? "custom")) {
+      services.customProviderForm.discovery = { status: "error", models: [], selectedModels: [], error: `Provider ID '${providerId}' already exists. Use a new ID.` };
+      refreshProviderSurface();
+      return;
+    }
+    if (runtime.trustedConfig === false && !isLocalProviderBaseUrl(baseUrl)) {
+      services.customProviderForm.discovery = {
+        status: "error",
+        models: [],
+        selectedModels: [],
+        error: `Refusing repository-defined endpoint ${sanitizeDisplayValue(baseUrl, "unknown")}. Review and explicitly trust the project config first.`
+      };
+      refreshProviderSurface();
       return;
     }
     try {
       buildModelsUrl({ baseUrl, modelsEndpoint: "/models" });
     } catch (error) {
       services.customProviderForm.discovery = { status: "error", models: [], selectedModels: [], error: `Invalid Base URL: ${error instanceof Error ? error.message : String(error)}` };
-      rebuildHome();
+      refreshProviderSurface();
       return;
     }
 
     services.customProviderForm.discovery = { status: "loading", models: [], selectedModels: [] };
-    rebuildHome();
+    refreshProviderSurface();
     try {
       const authStore = {
         async get() {
@@ -1793,13 +3252,17 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       services.customProviderForm.discovery = { status: "error", models: [], selectedModels: [], error: error instanceof Error ? error.message : String(error) };
     }
     if (shouldRefreshCustomProviderDiscoveryPanel(services.startupOverlay, services.authProviderId, services.customProviderForm.focusIndex)) {
-      rebuildHome();
+      refreshProviderSurface();
+    }
+    } finally {
+      mutationOperations.release(mutationLease);
     }
   };
   const scheduleCustomProviderModelDiscovery = (): void => {
     clearCustomProviderDiscoveryTimer();
     const form = services.customProviderForm;
     customProviderDiscoveryRequestId += 1;
+    if (operationIsBusy()) return;
     if (!shouldAutoDiscoverCustomProviderModels(form.baseUrl, form.apiKey)) {
       services.customProviderForm.discovery = defaultCustomProviderDiscovery();
       services.customProviderForm.selectedModelIndex = 0;
@@ -1807,14 +3270,17 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     }
     services.customProviderForm.discovery = { status: "loading", models: [], selectedModels: [] };
     services.customProviderForm.selectedModelIndex = 0;
-    rebuildHome();
+    refreshProviderSurface();
     const requestId = customProviderDiscoveryRequestId;
     customProviderDiscoveryTimer = setTimeout(() => {
       customProviderDiscoveryTimer = undefined;
-      void executeCustomProviderModelDiscovery(requestId);
+      void executeCustomProviderModelDiscovery(requestId, false);
     }, 450);
   };
   const executeCustomProviderFormSubmit = async (): Promise<void> => {
+    const mutationLease = acquireMutationOperation();
+    if (!mutationLease) return;
+    try {
     clearCustomProviderDiscoveryTimer();
     const form = services.customProviderForm;
     const providerId = form.providerId.trim();
@@ -1831,6 +3297,11 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       showOverlay("toasts");
       return;
     }
+    if (!isAvailableCustomProviderId(runtime.config, providerId, services.authProviderId ?? "custom")) {
+      services.toasts.push("error", `Provider ID '${providerId}' already exists. Use a new ID so saved credentials cannot be redirected.`);
+      showOverlay("toasts");
+      return;
+    }
     try {
       buildModelsUrl({ baseUrl, modelsEndpoint: "/models" });
     } catch (error) {
@@ -1843,8 +3314,13 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       showOverlay("toasts");
       return;
     }
+    if (runtime.trustedConfig === false && !isLocalProviderBaseUrl(baseUrl)) {
+      services.toasts.push("error", `Refusing repository-defined endpoint ${sanitizeDisplayValue(baseUrl, "unknown")}. Review and explicitly trust the project config first.`);
+      showOverlay("toasts");
+      return;
+    }
     try {
-      const updated = await persistConfigUpdate({ path: DEFAULT_CONFIG_PATH, directory: "", config: runtime.config }, config => {
+      const updated = await persistConfigUpdate({ path: runtime.state.configPath, directory: path.dirname(runtime.state.configPath), config: runtime.config }, config => {
         const nextConfig = structuredClone(config);
         nextConfig.providers[providerId] = {
           type: "openai-compatible",
@@ -1852,32 +3328,43 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
           apiKeyEnv: apiKeyEnvForProviderId(providerId),
           baseUrl,
           modelsEndpoint: "/models",
+          allowUnauthenticated: undefined,
           enabled: true
         };
         const selectedModels = selectedCustomProviderModels(form.discovery.models, form.discovery.selectedModels);
+        const configuredModelKeys: string[] = [];
         for (const modelId of selectedModels) {
           const existing = nextConfig.models[modelId];
-          nextConfig.models[modelId] = {
+          const key = existing && existing.provider !== providerId ? `${providerId}:${modelId}` : modelId;
+          const existingForProvider = nextConfig.models[key];
+          nextConfig.models[key] = {
             provider: providerId,
             model: modelId,
             enabled: true,
             source: "discovered",
-            displayName: existing?.displayName ?? modelId,
-            options: existing?.options
+            displayName: existingForProvider?.displayName ?? modelId,
+            options: existingForProvider?.options
           };
+          configuredModelKeys.push(key);
         }
-        const firstModel = selectedModels[0];
+        const firstModel = configuredModelKeys[0];
         if (firstModel && nextConfig.agents[nextConfig.defaultAgent]) {
           nextConfig.agents[nextConfig.defaultAgent].model = firstModel;
         }
         return nextConfig;
       });
       refreshRuntimeFromConfig(runtime, updated);
-      await authStoreForConfig(updated, DEFAULT_CONFIG_PATH).set(providerId, { type: "api", key: apiKey });
+      refreshUiControls(runtime, services);
+      await authStoreForConfig(updated, runtime.state.configPath, runtime.trustedConfig === true).set(providerId, {
+        type: "api",
+        key: apiKey,
+        metadata: { providerType: "openai-compatible", origin: baseUrl }
+      });
       await reloadProviderAuth(runtime, services);
       services.toasts.push("success", `Connected ${providerId}.`);
       services.authProviderId = undefined;
       services.authProviderTitle = undefined;
+      services.authProviderEndpoint = undefined;
       services.authInputDraft = "";
       services.customProviderForm = defaultCustomProviderForm();
       services.modelProviderFilter = providerId;
@@ -1887,34 +3374,42 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       services.toasts.push("error", `Error: ${error instanceof Error ? error.message : String(error)}`);
       showOverlay("toasts");
     }
+    } finally {
+      mutationOperations.release(mutationLease);
+    }
   };
   const executeProviderAuthSubmit = async (apiKey: string): Promise<void> => {
     if (services.authProviderId === "custom") {
       await executeCustomProviderFormSubmit();
       return;
     }
+    const mutationLease = acquireMutationOperation();
+    if (!mutationLease) return;
+    try {
     const providerId = services.authProviderId;
     if (!providerId || !apiKey.trim()) {
-      services.startupOverlay = "none";
       services.authInputDraft = "";
-      rebuildHome();
+      showOverlay("none");
       return;
     }
     const response = await handleConnectCommand(`/connect ${providerId} ${apiKey.trim()}`, {
       config: runtime.config,
-      configPath: DEFAULT_CONFIG_PATH,
+      configPath: runtime.state.configPath,
       state: runtime.state,
       noColor: true,
+      trustedConfig: runtime.trustedConfig,
       onConfigUpdated: config => {
         refreshRuntimeFromConfig(runtime, config);
+        refreshUiControls(runtime, services);
         services.toasts.push("success", `Connected ${providerId}.`);
       }
     });
     await reloadProviderAuth(runtime, services);
     services.authProviderId = undefined;
     services.authProviderTitle = undefined;
+    services.authProviderEndpoint = undefined;
     services.authInputDraft = "";
-    if (response.startsWith("Error:") || response.startsWith("Unknown provider") || response.startsWith("Usage:")) {
+    if (response.startsWith("Error:") || response.startsWith("Unknown provider") || response.startsWith("Usage:") || response.startsWith("Refusing")) {
       services.toasts.push("error", response);
       showOverlay("toasts");
       return;
@@ -1922,6 +3417,9 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     services.modelProviderFilter = providerId;
     services.pickerIndex = selectedModelIndexForProvider(runtime, providerId);
     showOverlay("models");
+    } finally {
+      mutationOperations.release(mutationLease);
+    }
   };
   const submitHomeValue = async (value: string): Promise<void> => {
     if (services.startupOverlay === "providerAuth") {
@@ -1931,7 +3429,7 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     }
     services.promptDraft = "";
     services.startupOverlay = "none";
-    if (await openHomeOverlayForCommand(value)) return;
+    if (fullTuiRouteForInput(value) && await openFullTuiRoute(value)) return;
     if (value) void handleSubmit(value);
   };
   const submitPrompt = () => {
@@ -1939,81 +3437,173 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     textarea.clear();
     void submitHomeValue(value);
   };
-  const rebuildHome = () => {
-    textarea = buildHome(core, renderer, runtime, services, value => {
-      if (shouldSubmitHomeValue(services.startupOverlay, value)) void submitHomeValue(value);
-      else if (services.startupOverlay === "slashCommands") void executeSlashSelection();
-    }, () => syncSlashOverlay(), {
-      onProviderSelect(index) {
-        services.pickerIndex = index;
-        executeProviderSelection();
-      },
-      onProviderQueryChange() {
-        rebuildHome();
-      },
-      onProviderAuthMethodSelect(index) {
-        services.pickerIndex = index;
-        void executeProviderAuthMethodSelection();
-      },
-      onProviderAuthSubmit(value) {
-        services.authInputDraft = value;
-        void executeProviderAuthSubmit(value);
-      },
-      onCustomProviderFieldFocus(index) {
-        services.customProviderForm.focusIndex = Math.max(0, Math.min(index, CUSTOM_PROVIDER_FOCUS_COUNT - 1));
-        rebuildHome();
-      },
-      onCustomProviderFieldChange(field) {
-        if (field === "baseUrl" || field === "apiKey") scheduleCustomProviderModelDiscovery();
-      },
-      onCustomProviderDiscover() {
-        void executeCustomProviderModelDiscovery();
-      },
-      onCustomProviderModelToggle(index) {
-        const discovery = services.customProviderForm.discovery;
-        const modelId = discovery.models[index];
-        if (!modelId) return;
-        services.customProviderForm.selectedModelIndex = index;
-        services.customProviderForm.discovery = {
-          ...discovery,
-          selectedModels: toggleCustomProviderSelectedModel(discovery.models, discovery.selectedModels, modelId)
-        };
-        rebuildHome();
-      },
-      onCustomProviderSubmit() {
-        void executeCustomProviderFormSubmit();
-      },
-      onModelSelect(index) {
-        services.pickerIndex = index;
-        void executeModelSelection();
-      }
-    });
+  const refreshProviderSurface = (): void => {
+    if (activeSessionView) {
+      refreshProviderPopupLayer(core, renderer, runtime, services, providerDialogCallbacks);
+      return;
+    }
+    rebuildHome();
   };
-  const showOverlay = (overlay: TuiServices["startupOverlay"]) => {
+  const providerDialogCallbacks: ProviderDialogCallbacks = {
+    onSlashFocus(index) {
+      if (services.slashIndex === index) return;
+      services.slashIndex = index;
+      rebuildHome();
+    },
+    onSlashSelect(index) {
+      services.slashIndex = index;
+      void executeSlashSelection(textarea.plainText);
+    },
+    onProviderSelect(index) {
+      services.pickerIndex = index;
+      executeProviderSelection();
+    },
+    onProviderQueryChange() {
+      refreshProviderSurface();
+    },
+    onProviderAuthMethodSelect(index) {
+      if (operationIsBusy()) {
+        reportBusy();
+        return;
+      }
+      services.pickerIndex = index;
+      void executeProviderAuthMethodSelection();
+    },
+    onProviderAuthSubmit(value) {
+      if (operationIsBusy()) {
+        reportBusy();
+        return;
+      }
+      services.authInputDraft = value;
+      void executeProviderAuthSubmit(value);
+    },
+    onCustomProviderFieldFocus(index) {
+      services.customProviderForm.focusIndex = Math.max(0, Math.min(index, CUSTOM_PROVIDER_FOCUS_COUNT - 1));
+      refreshProviderSurface();
+    },
+    onCustomProviderFieldChange(field) {
+      if (field === "baseUrl" || field === "apiKey") {
+        clearCustomProviderDiscoveryTimer();
+        customProviderDiscoveryRequestId += 1;
+        services.customProviderForm.discovery = defaultCustomProviderDiscovery();
+        services.customProviderForm.selectedModelIndex = 0;
+      }
+    },
+    onCustomProviderDiscover() {
+      void executeCustomProviderModelDiscovery();
+    },
+    onCustomProviderModelToggle(index) {
+      if (operationIsBusy()) {
+        reportBusy();
+        return;
+      }
+      const discovery = services.customProviderForm.discovery;
+      const modelId = discovery.models[index];
+      if (!modelId) return;
+      services.customProviderForm.selectedModelIndex = index;
+      services.customProviderForm.discovery = {
+        ...discovery,
+        selectedModels: toggleCustomProviderSelectedModel(discovery.models, discovery.selectedModels, modelId)
+      };
+      refreshProviderSurface();
+    },
+    onCustomProviderSubmit() {
+      void executeCustomProviderFormSubmit();
+    },
+    onModelSelect(index) {
+      if (operationIsBusy()) {
+        reportBusy();
+        return;
+      }
+      services.pickerIndex = index;
+      void executeModelSelection();
+    }
+  };
+  const rebuildHome = () => {
+    activeSessionView = undefined;
+    activeScroll = undefined;
+    activeHomeView = buildHome(core, renderer, runtime, services, value => {
+      if (shouldSubmitHomeValue(services.startupOverlay, value)) void submitHomeValue(value);
+      else if (services.startupOverlay === "slashCommands") void executeSlashSelection(value);
+    }, () => syncSlashOverlay(), providerDialogCallbacks);
+    textarea = activeHomeView.textarea;
+  };
+  services.onAgentChanged = () => {
+    if (activeHomeView) {
+      rebuildHome();
+      return;
+    }
+    if (activeSessionView) {
+      activeSessionView.prompt.meta.content = modelLine(core, runtime.state, services.controls);
+      activeSessionView.summary.refresh();
+      renderer.requestRender();
+    }
+  };
+  const showOverlay = (overlay: TuiServices["startupOverlay"]): ModelRefreshToken | undefined => {
+    const modelRefresh = overlay === "models" ? modelRefreshes.begin() : undefined;
+    if (!modelRefresh) modelRefreshes.invalidate();
     services.startupOverlay = overlay;
     services.dialogs.close();
+    if (activeSessionView) {
+      if (isOpenCodeDialogOverlay(services)) {
+        if (!focusBeforeProviderPopup || focusBeforeProviderPopup.isDestroyed) {
+          focusBeforeProviderPopup = renderer.currentFocusedRenderable ?? activeSessionView.textarea;
+        }
+        refreshProviderSurface();
+      } else {
+        const restoreTarget = focusBeforeProviderPopup && !focusBeforeProviderPopup.isDestroyed
+          ? focusBeforeProviderPopup
+          : activeSessionView.textarea;
+        focusBeforeProviderPopup = undefined;
+        closeProviderPopupLayer(renderer, restoreTarget);
+      }
+      return modelRefresh;
+    }
     rebuildHome();
+    return modelRefresh;
+  };
+  const refreshSlashSurface = () => {
+    if (!activeSessionView) {
+      rebuildHome();
+      return;
+    }
+    addSessionSlashCommandOverlay(core, renderer, services, {
+      onSlashFocus(index) {
+        if (services.slashIndex === index) return;
+        services.slashIndex = index;
+        refreshSlashSurface();
+      },
+      onSlashSelect(index) {
+        services.slashIndex = index;
+        void executeSlashSelection(textarea.plainText);
+      }
+    });
+    activeSessionView.textarea.focus();
+    renderer.focusRenderable(activeSessionView.textarea);
   };
   const executePaletteSelection = async (): Promise<void> => {
     const selected = services.palette.selected();
     services.promptDraft = "";
     services.startupOverlay = "none";
-    if (selected && await openHomeOverlayForCommand(selected.slash)) {
+    if (selected && await openFullTuiRoute(selected.slash)) {
       return;
     }
     if (selected) void handleSubmit(selected.slash);
   };
-  const executeSlashSelection = async (): Promise<void> => {
-    const commands = slashCommands(services);
+  const executeSlashSelection = async (submittedText: string): Promise<void> => {
+    const commands = slashCommands(services, submittedText);
     const selected = selectedSlashCommand(commands, services.slashIndex);
+    const value = resolveSlashSubmission(submittedText, selected?.slash);
+    const sessionScroll = activeScroll;
     services.promptDraft = "";
     services.startupOverlay = "none";
-    if (selected) {
+    removeSessionSlashCommandOverlay(renderer.root);
+    if (value) {
       textarea.clear();
-      if (await openHomeOverlayForCommand(selected.slash)) {
+      if (await openFullTuiRoute(value)) {
         return;
       }
-      void handleSubmit(selected.slash);
+      void handleSubmit(value, sessionScroll);
     }
   };
   const updateSlashScroll = (commands: ReturnType<typeof slashCommands>) => {
@@ -2030,28 +3620,45 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     const commands = slashCommands(services);
     services.slashIndex = nextSelectionIndex(services.slashIndex, commands.length, delta);
     updateSlashScroll(commands);
-    rebuildHome();
+    refreshSlashSurface();
+    return true;
+  };
+  const closeSlashSelection = (): boolean => {
+    if (services.startupOverlay !== "slashCommands") return false;
+    services.promptDraft = "";
+    services.slashIndex = 0;
+    services.slashScrollIndex = 0;
+    textarea.clear();
+    services.startupOverlay = "none";
+    if (activeSessionView) {
+      removeSessionSlashCommandOverlay(renderer.root);
+      activeSessionView.textarea.focus();
+      renderer.focusRenderable(activeSessionView.textarea);
+      renderer.requestRender();
+    } else {
+      rebuildHome();
+    }
     return true;
   };
   const moveProviderSelection = (delta: -1 | 1): boolean => {
     if (services.startupOverlay !== "providers") return false;
     const providers = providerPickerEntries(runtime, services.providerQuery);
     services.pickerIndex = nextSelectionIndex(services.pickerIndex, providers.length, delta);
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const moveProviderAuthMethodSelection = (delta: -1 | 1): boolean => {
     if (services.startupOverlay !== "providerAuthMethod" || !services.authProviderId) return false;
     const methods = providerAuthMethods(runtime, services.authProviderId);
     services.pickerIndex = nextSelectionIndex(services.pickerIndex, methods.length, delta);
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const moveCustomProviderFormFocus = (delta: -1 | 1): boolean => {
     if (services.startupOverlay !== "providerAuth" || services.authProviderId !== "custom") return false;
     services.customProviderForm.focusIndex = nextSelectionIndex(services.customProviderForm.focusIndex, CUSTOM_PROVIDER_FOCUS_COUNT, delta);
     services.customProviderForm.selectedModelIndex = Math.max(0, Math.min(services.customProviderForm.selectedModelIndex, Math.max(0, services.customProviderForm.discovery.models.length - 1)));
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const moveCustomProviderModelSelection = (delta: -1 | 1): boolean => {
@@ -2061,11 +3668,15 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     const nextIndex = form.selectedModelIndex + delta;
     if (nextIndex < 0 || nextIndex >= form.discovery.models.length) return false;
     form.selectedModelIndex = nextIndex;
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const toggleFocusedCustomProviderModel = (): boolean => {
     if (services.startupOverlay !== "providerAuth" || services.authProviderId !== "custom") return false;
+    if (operationIsBusy()) {
+      reportBusy();
+      return true;
+    }
     const form = services.customProviderForm;
     if (form.focusIndex !== CUSTOM_PROVIDER_DISCOVER_INDEX || form.discovery.status !== "ready") return false;
     const modelId = form.discovery.models[form.selectedModelIndex];
@@ -2074,25 +3685,35 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       ...form.discovery,
       selectedModels: toggleCustomProviderSelectedModel(form.discovery.models, form.discovery.selectedModels, modelId)
     };
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const moveModelSelection = (delta: -1 | 1): boolean => {
     if (services.startupOverlay !== "models") return false;
     const models = modelPickerEntriesForProvider(runtime, services.modelProviderFilter);
     services.pickerIndex = nextSelectionIndex(services.pickerIndex, models.length, delta);
-    rebuildHome();
+    refreshProviderSurface();
     return true;
   };
   const executeProviderSelection = () => {
+    if (operationIsBusy()) {
+      reportBusy();
+      return;
+    }
     if (!runtime.config) return;
     const providers = providerPickerEntries(runtime, services.providerQuery);
     const selected = providers[Math.max(0, Math.min(services.pickerIndex, providers.length - 1))];
-    services.providerQuery = "";
     if (selected) {
-      textarea.clear();
       const [providerId, provider] = selected;
       const authOverlay = provider.type !== "mock" ? providerAuthOverlayForMethods(providerAuthMethods(runtime, providerId)) : undefined;
+      const catalogProvider = createProviderCatalog(runtime.config, services.providerAuth, { allowEnvironmentCredentials: runtime.trustedConfig === true })
+        .all.find(item => item.id === providerId);
+      const requiresAuthentication = authOverlay === "providerAuthMethod"
+        || (providerId === "custom" && authOverlay === "providerAuth")
+        || (provider.type !== "mock" && !catalogProvider?.connected);
+      services.providerQuery = "";
+      textarea.clear();
+      services.authProviderEndpoint = provider.baseUrl;
       if (authOverlay === "providerAuthMethod") {
         services.authProviderId = providerId;
         services.authProviderTitle = undefined;
@@ -2109,7 +3730,6 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
         showOverlay("providerAuth");
         return;
       }
-      const catalogProvider = runtime.config ? createProviderCatalog(runtime.config, services.providerAuth).all.find(item => item.id === providerId) : undefined;
       if (provider.type !== "mock" && !catalogProvider?.connected) {
         services.authProviderId = providerId;
         services.authInputDraft = "";
@@ -2123,6 +3743,10 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     }
   };
   const executeProviderAuthMethodSelection = async () => {
+    if (operationIsBusy()) {
+      reportBusy();
+      return;
+    }
     const providerId = services.authProviderId;
     if (!providerId) return;
     const methods = providerAuthMethods(runtime, providerId);
@@ -2145,10 +3769,14 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     services.authInputDraft = "";
     services.authProviderId = undefined;
     services.authProviderTitle = undefined;
-    services.startupOverlay = "none";
+    services.authProviderEndpoint = undefined;
+    showOverlay("none");
     await handleSubmit(command);
   };
   const executeModelSelection = async () => {
+    const mutationLease = acquireMutationOperation();
+    if (!mutationLease) return;
+    try {
     if (!runtime.config) return;
     const models = modelPickerEntriesForProvider(runtime, services.modelProviderFilter);
     const selected = models[Math.max(0, Math.min(services.pickerIndex, models.length - 1))];
@@ -2156,15 +3784,21 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     if (!selected) return;
     textarea.clear();
     try {
-      const updated = await persistConfigUpdate({ path: DEFAULT_CONFIG_PATH, directory: "", config: runtime.config }, config => selectModel(config, selected[0]));
+      const updated = await persistConfigUpdate({ path: runtime.state.configPath, directory: path.dirname(runtime.state.configPath), config: runtime.config }, config => selectModel(config, selected[0], runtime.activeAgentId ?? config.defaultAgent));
       refreshRuntimeFromConfig(runtime, updated);
-      services.toasts.push("success", "Model config updated.");
+      refreshUiControls(runtime, services);
+      const agentLabel = sanitizeDisplayValue(runtime.state.defaultAgent, runtime.activeAgentId ?? runtime.config.defaultAgent);
+      const modelLabel = sanitizeDisplayValue(selected[1].displayName ?? selected[0], selected[0]);
+      services.toasts.push("success", `${agentLabel} now uses ${modelLabel}.`);
+      services.onAgentChanged?.();
       services.modelProviderFilter = undefined;
-      services.startupOverlay = "none";
-      rebuildHome();
+      showOverlay("none");
     } catch (error) {
       services.toasts.push("error", `Error: ${error instanceof Error ? error.message : String(error)}`);
       showOverlay("toasts");
+    }
+    } finally {
+      mutationOperations.release(mutationLease);
     }
   };
   const submitOpenCodeDialog = (): boolean => {
@@ -2199,12 +3833,15 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     services.authInputDraft = "";
     services.authProviderId = undefined;
     services.authProviderTitle = undefined;
+    services.authProviderEndpoint = undefined;
     services.customProviderForm = defaultCustomProviderForm();
     showOverlay("none");
     return true;
   };
   const syncSlashOverlay = () => {
+    if (!shouldSyncSlashOverlay(Boolean(activeSessionView))) return;
     const draft = textarea.plainText;
+    const previousQuery = slashQuery(services.promptDraft);
     if (services.startupOverlay === "providerAuthMethod" || services.startupOverlay === "providerAuth") {
       services.promptDraft = "";
       return;
@@ -2220,6 +3857,13 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     services.promptDraft = draft;
     const query = slashQuery(draft);
     if (query === undefined) {
+      if (activeSessionView) {
+        removeSessionSlashCommandOverlay(renderer.root);
+        if (services.startupOverlay === "slashCommands") services.startupOverlay = "none";
+        services.promptDraft = draft;
+        renderer.requestRender();
+        return;
+      }
       if (services.startupOverlay === "providers") {
         const providers = providerPickerEntries(runtime, services.providerQuery);
         services.pickerIndex = providers.length === 0 ? 0 : Math.min(services.pickerIndex, providers.length - 1);
@@ -2230,12 +3874,56 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       return;
     }
     const commands = slashCommands(services);
+    if (query !== previousQuery) {
+      services.slashIndex = 0;
+      services.slashScrollIndex = 0;
+    }
     services.slashIndex = Math.max(0, Math.min(services.slashIndex, Math.max(0, commands.length - 1)));
     updateSlashScroll(commands);
+    if (activeSessionView) {
+      services.startupOverlay = "slashCommands";
+      refreshSlashSurface();
+      return;
+    }
     showOverlay("slashCommands");
   };
+  const cycleActivePrimaryAgent = (direction: 1 | -1): boolean => {
+    if (operationIsBusy()) {
+      reportBusy();
+      return true;
+    }
+    if (services.startupOverlay !== "none" || services.helpOpen || services.summaryOpen) return false;
+    try {
+      const next = cyclePrimaryAgent(runtime.activeAgentId ?? runtime.config?.defaultAgent ?? "tesla", direction);
+      const agent = activateRuntimeAgent(runtime, next.id);
+      refreshUiControls(runtime, services);
+      services.onAgentChanged?.();
+      services.toasts.push("success", `Active agent: ${agent.displayName ?? agent.name}`);
+    } catch (error) {
+      services.toasts.push("error", `Agent switch failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return true;
+  };
+  const unregisterAgentCycleLayer = keymap.registerLayer({
+    priority: 150,
+    commands: [
+      { name: "agent.cycle.next", desc: "Next main agent", run: () => cycleActivePrimaryAgent(1) },
+      { name: "agent.cycle.previous", desc: "Previous main agent", run: () => cycleActivePrimaryAgent(-1) }
+    ],
+    bindings: [
+      ...services.tuiConfig.keybinds.agent_next.map(key => ({ key, cmd: "agent.cycle.next" })),
+      ...services.tuiConfig.keybinds.agent_previous.map(key => ({ key, cmd: "agent.cycle.previous" }))
+    ]
+  });
+  const unregisterReasoningFocusLayer = keymap.registerLayer({
+    priority: 150,
+    commands: [
+      { name: "reasoning.disclosure.focus", desc: "Focus completed reasoning", run: focusReasoningDisclosure }
+    ],
+    bindings: services.tuiConfig.keybinds.reasoning_focus.map(key => ({ key, cmd: "reasoning.disclosure.focus" }))
+  });
   const unregisterSlashNavigationLayer = keymap.registerLayer({
-    priority: 100,
+    priority: 400,
     commands: [
       {
         name: "prompt.slash.previous",
@@ -2250,15 +3938,34 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
         run() {
           return moveSlashSelection(1);
         }
+      },
+      {
+        name: "prompt.slash.submit",
+        desc: "Run selected slash command",
+        run() {
+          if (services.startupOverlay !== "slashCommands") return false;
+          void executeSlashSelection(textarea.plainText);
+          return true;
+        }
+      },
+      {
+        name: "prompt.slash.close",
+        desc: "Close slash commands",
+        run() {
+          return closeSlashSelection();
+        }
       }
     ],
     bindings: [
       { key: "up", cmd: "prompt.slash.previous" },
-      { key: "down", cmd: "prompt.slash.next" }
+      { key: "down", cmd: "prompt.slash.next" },
+      { key: "return", cmd: "prompt.slash.submit" },
+      { key: "enter", cmd: "prompt.slash.submit" },
+      { key: "escape", cmd: "prompt.slash.close" }
     ]
   });
   const unregisterOpenCodeDialogNavigationLayer = keymap.registerLayer({
-    priority: 200,
+    priority: 400,
     commands: [
       {
         name: "dialog.provider.previous",
@@ -2266,7 +3973,7 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
         run() {
           if (services.startupOverlay === "providers") return moveProviderSelection(-1);
           if (services.startupOverlay === "providerAuthMethod") return moveProviderAuthMethodSelection(-1);
-          if (services.startupOverlay === "providerAuth") return moveCustomProviderFormFocus(-1);
+          if (services.startupOverlay === "providerAuth") return moveCustomProviderModelSelection(-1) || moveCustomProviderFormFocus(-1);
           if (services.startupOverlay === "models") return moveModelSelection(-1);
           return false;
         }
@@ -2277,7 +3984,7 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
         run() {
           if (services.startupOverlay === "providers") return moveProviderSelection(1);
           if (services.startupOverlay === "providerAuthMethod") return moveProviderAuthMethodSelection(1);
-          if (services.startupOverlay === "providerAuth") return moveCustomProviderFormFocus(1);
+          if (services.startupOverlay === "providerAuth") return moveCustomProviderModelSelection(1) || moveCustomProviderFormFocus(1);
           if (services.startupOverlay === "models") return moveModelSelection(1);
           return false;
         }
@@ -2308,102 +4015,65 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
   renderer.keyInput.on("keypress", key => {
     const inputKey = keyEventToInput(key);
     const navigationKey = navigationKeyName(key.name);
+    if (inputKey === "ctrl+h" || inputKey === "f1") {
+      key.preventDefault();
+      key.stopPropagation();
+      toggleHelp();
+      return;
+    }
+    if (inputKey === "f2") {
+      key.preventDefault();
+      key.stopPropagation();
+      toggleSummary();
+      return;
+    }
+    if (services.helpOpen) {
+      if (navigationKey === "escape") {
+        key.preventDefault();
+        key.stopPropagation();
+        closeHelp();
+      }
+      return;
+    }
+    if (services.summaryOpen) {
+      if (navigationKey === "escape") {
+        key.preventDefault();
+        key.stopPropagation();
+        closeSummary();
+      }
+      return;
+    }
+    const scrollKey = key.name.toLowerCase();
+    if (activeScroll && services.startupOverlay === "none" && (scrollKey === "pageup" || scrollKey === "pagedown" || inputKey === "ctrl+home" || inputKey === "ctrl+end" || inputKey === "ctrl+up" || inputKey === "ctrl+down")) {
+      key.preventDefault();
+      key.stopPropagation();
+      if (inputKey === "ctrl+home") scrollTranscript("start");
+      else if (inputKey === "ctrl+end") scrollTranscript("end");
+      else if (scrollKey === "pageup") scrollTranscript("page-up");
+      else if (scrollKey === "pagedown") scrollTranscript("page-down");
+      else scrollTranscript(inputKey === "ctrl+up" ? "step-up" : "step-down");
+      return;
+    }
     if (shouldCopySelectionForInput(inputKey, selectedTextForClipboard(renderer.getSelection())) && copyCurrentSelection()) {
       key.preventDefault();
       key.stopPropagation();
       return;
     }
-    if (isOpenCodeDialogOverlay(services)) {
-      if (navigationKey === "up" && services.startupOverlay === "providers") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveProviderSelection(-1);
-        return;
-      }
-      if (navigationKey === "down" && services.startupOverlay === "providers") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveProviderSelection(1);
-        return;
-      }
-      if (navigationKey === "return" && services.startupOverlay === "providers") {
-        key.preventDefault();
-        key.stopPropagation();
-        submitOpenCodeDialog();
-        return;
-      }
-      if (navigationKey === "up" && services.startupOverlay === "providerAuthMethod") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveProviderAuthMethodSelection(-1);
-        return;
-      }
-      if (navigationKey === "down" && services.startupOverlay === "providerAuthMethod") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveProviderAuthMethodSelection(1);
-        return;
-      }
-      if (navigationKey === "return" && services.startupOverlay === "providerAuthMethod") {
-        key.preventDefault();
-        key.stopPropagation();
-        submitOpenCodeDialog();
-        return;
-      }
-      if (navigationKey === "return" && services.startupOverlay === "providerAuth") {
-        key.preventDefault();
-        key.stopPropagation();
-        submitOpenCodeDialog();
-        return;
-      }
-      if (navigationKey === "up" && services.startupOverlay === "providerAuth" && services.authProviderId === "custom") {
-        key.preventDefault();
-        key.stopPropagation();
-        if (!moveCustomProviderModelSelection(-1)) moveCustomProviderFormFocus(-1);
-        return;
-      }
-      if (navigationKey === "down" && services.startupOverlay === "providerAuth" && services.authProviderId === "custom") {
-        key.preventDefault();
-        key.stopPropagation();
-        if (!moveCustomProviderModelSelection(1)) moveCustomProviderFormFocus(1);
-        return;
-      }
-      if (navigationKey === "up" && services.startupOverlay === "models") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveModelSelection(-1);
-        return;
-      }
-      if (navigationKey === "down" && services.startupOverlay === "models") {
-        key.preventDefault();
-        key.stopPropagation();
-        moveModelSelection(1);
-        return;
-      }
-      if (navigationKey === "return" && services.startupOverlay === "models") {
-        key.preventDefault();
-        key.stopPropagation();
-        submitOpenCodeDialog();
-        return;
-      }
-      if (navigationKey === "escape") {
-        key.preventDefault();
-        key.stopPropagation();
-        closeOpenCodeDialog();
-        return;
-      }
-      return;
-    }
+    // Modal navigation is owned exclusively by the high-priority keymap layer.
+    // Letting this raw listener process the same key caused every arrow/Enter
+    // event to run twice and could advance through two dialogs at once.
+    if (isOpenCodeDialogOverlay(services)) return;
     if (services.startupOverlay === "whichkey") {
       const command = commandForKey(services, inputKey);
       key.preventDefault();
       key.stopPropagation();
       if (command === "command_palette") showOverlay("palette");
+      else if (command === "help") toggleHelp();
       else if (command === "theme_picker") showOverlay("themes");
       else if (command === "model_picker") showOverlay("models");
       else if (command === "session_list") showOverlay("sessions");
-      else if (command === "status") void handleSubmit("/status");
-      else if (command === "session_new") void handleSubmit("/new");
+      else if (command === "agent_next") { showOverlay("none"); void handleSubmit("/agent next"); }
+      else if (command === "agent_previous") { showOverlay("none"); void handleSubmit("/agent previous"); }
       else if (command === "app_exit") exit();
       else showOverlay("none");
       return;
@@ -2411,27 +4081,11 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
     if (services.tuiConfig.leader && inputKey === services.tuiConfig.leader) {
       key.preventDefault();
       key.stopPropagation();
+      if (activeSessionView) return;
       showOverlay("whichkey");
       return;
     }
-    if (navigationKey === "up" && services.startupOverlay === "slashCommands") {
-      key.preventDefault();
-      key.stopPropagation();
-      moveSlashSelection(-1);
-      return;
-    }
-    if (navigationKey === "down" && services.startupOverlay === "slashCommands") {
-      key.preventDefault();
-      key.stopPropagation();
-      moveSlashSelection(1);
-      return;
-    }
-    if (navigationKey === "return" && services.startupOverlay === "slashCommands") {
-      key.preventDefault();
-      key.stopPropagation();
-      void executeSlashSelection();
-      return;
-    }
+    // Slash navigation and submission are handled by the slash keymap layer.
     if (navigationKey === "up" && services.startupOverlay === "palette") {
       key.preventDefault();
       key.stopPropagation();
@@ -2453,29 +4107,64 @@ export async function runTui(input: NodeJS.ReadableStream = process.stdin, outpu
       return;
     }
     if (navigationKey === "escape") {
+      if (activeSessionView && services.startupOverlay === "slashCommands") {
+        key.preventDefault();
+        key.stopPropagation();
+        services.startupOverlay = "none";
+        services.promptDraft = "";
+        activeSessionView.textarea.clear();
+        removeSessionSlashCommandOverlay(renderer.root);
+        activeSessionView.textarea.focus();
+        renderer.focusRenderable(activeSessionView.textarea);
+        renderer.requestRender();
+        return;
+      }
+      if (activeSessionView && services.startupOverlay === "none" && !services.dialogs.active()) {
+        key.preventDefault();
+        key.stopPropagation();
+        activeSessionView.textarea.focus();
+        renderer.focusRenderable(activeSessionView.textarea);
+        return;
+      }
       services.dialogs.close();
       services.promptDraft = promptDraftAfterEscape(services.startupOverlay, textarea.plainText);
       if (services.startupOverlay === "slashCommands" || services.startupOverlay === "providerAuthMethod" || services.startupOverlay === "providerAuth") textarea.clear();
       if (services.startupOverlay === "providerAuthMethod" || services.startupOverlay === "providerAuth") {
         services.authProviderId = undefined;
         services.authProviderTitle = undefined;
+        services.authProviderEndpoint = undefined;
         services.authInputDraft = "";
       }
       showOverlay("none");
       return;
     }
-    if (!key.ctrl && !key.meta) setImmediate(syncSlashOverlay);
+    if (shouldSyncSlashOverlay(Boolean(activeSessionView), key.ctrl, key.meta)) setImmediate(syncSlashOverlay);
   });
+  const handleRendererResize = (width: number) => {
+    activeSessionView?.resize(width);
+    activeHomeView?.resize(width);
+    if (services.helpOpen) addHelpOverlay(core, renderer);
+    if (services.summaryOpen) addSummaryOverlay(core, renderer, runtime, services, sessionTitle);
+  };
+  renderer.on("resize", handleRendererResize);
   rebuildHome();
 
   await new Promise<void>(resolve => {
     renderer.once("destroy", () => {
-      clearCustomProviderDiscoveryTimer();
-      unregisterOpenCodeDialogNavigationLayer();
-      unregisterSlashNavigationLayer();
-      unregisterTextareaLayer();
-      unregisterBaseLayout();
-      resolve();
+      void (async () => {
+        clearCustomProviderDiscoveryTimer();
+        renderer.off("resize", handleRendererResize);
+        questionSurface?.destroy();
+        unregisterTranscriptNavigationLayer();
+        unregisterOpenCodeDialogNavigationLayer();
+        unregisterAgentCycleLayer();
+        unregisterReasoningFocusLayer();
+        unregisterSlashNavigationLayer();
+        unregisterTextareaLayer();
+        unregisterBaseLayout();
+        await runtime.runner?.close();
+        resolve();
+      })();
     });
   });
 }

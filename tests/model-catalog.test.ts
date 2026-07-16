@@ -1,7 +1,19 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { afterAll, beforeAll } from "vitest";
 import { loadConfig } from "../src/config/load";
+
+const previousHome = process.env.STRONGCODE_HOME;
+
+beforeAll(async () => {
+  process.env.STRONGCODE_HOME = await mkdtemp(path.join(tmpdir(), "strongcode-model-home-"));
+});
+
+afterAll(() => {
+  if (previousHome === undefined) delete process.env.STRONGCODE_HOME;
+  else process.env.STRONGCODE_HOME = previousHome;
+});
 
 async function writeBaseConfig(root: string): Promise<string> {
   const configPath = path.join(root, "strongcode.config.yaml");

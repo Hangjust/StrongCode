@@ -1,16 +1,18 @@
+import { slashCommandPaletteRows } from "../slash-command-registry";
+
 export interface PaletteCommand {
-  id: string;
-  title: string;
-  description: string;
-  slash: string;
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly slash: string;
 }
 
 export class CommandPalette {
   private commands: PaletteCommand[];
   private selectedIndex = 0;
 
-  constructor(commands: PaletteCommand[]) {
-    this.commands = commands;
+  constructor(commands: readonly PaletteCommand[]) {
+    this.commands = [...commands];
   }
 
   list(): PaletteCommand[] {
@@ -50,12 +52,7 @@ export class CommandPalette {
 }
 
 export function createDefaultPalette(): CommandPalette {
-  return new CommandPalette([
-    { id: "connect", title: "Connect", description: "Connect a provider with /connect <provider> <api-key>", slash: "/connect" },
-    { id: "model", title: "Model", description: "Show and switch the active model", slash: "/model" },
-    { id: "models", title: "Models", description: "Alias for /model", slash: "/models" },
-    { id: "exit", title: "Exit", description: "Close StrongCode", slash: "/exit" }
-  ]);
+  return new CommandPalette(slashCommandPaletteRows);
 }
 
 export function renderPalette(commands: PaletteCommand[]): string {

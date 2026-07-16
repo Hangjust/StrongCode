@@ -1,7 +1,7 @@
 import type { ModelConfig, ProviderConfig, StrongCodeConfig } from "../config/schema";
-import { discoverOpenAICompatibleModels, DiscoveryFetcher } from "./discovery";
+import { discoverProviderModels, DiscoveryFetcher } from "./discovery";
 import type { ProviderAuth, ProviderAuthReader } from "./auth-store";
-import { orderedProviders } from "./registry";
+import { allowsCredentiallessLocalProvider, orderedProviders } from "./registry";
 
 export interface ModelAvailabilityResult {
   config: StrongCodeConfig;
@@ -15,13 +15,17 @@ interface AuthStoreWithAll extends ProviderAuthReader {
 }
 
 function providerHasCredentials(providerId: string, provider: ProviderConfig, auth: ProviderAuth | undefined): boolean {
+  if (allowsCredentiallessLocalProvider(providerId, provider)) return true;
   if (provider.apiKeyEnv && process.env[provider.apiKeyEnv]) return true;
   if (auth?.type === "api" && auth.key.length > 0) return true;
-  return providerId === "openai" && auth?.type === "oauth" && auth.access.length > 0;
+  return false;
 }
 
 export function supportsAuthenticatedModelDiscovery(provider: ProviderConfig): boolean {
-  return (provider.type === "openai" || provider.type === "openai-compatible") && Boolean(provider.baseUrl);
+  return (provider.type === "openai"
+    || provider.type === "openai-compatible"
+    || provider.type === "anthropic"
+    || provider.type === "google") && Boolean(provider.baseUrl);
 }
 
 function existingModelKey(models: StrongCodeConfig["models"], providerId: string, modelId: string): string | undefined {
@@ -66,7 +70,7 @@ export async function discoverAuthenticatedProviderModels(config: StrongCodeConf
     if (!providerHasCredentials(providerId, provider, auth[providerId])) continue;
 
     try {
-      const models = await discoverOpenAICompatibleModels({
+      const models = await discoverProviderModels({
         id: providerId,
         ...provider,
         authStore

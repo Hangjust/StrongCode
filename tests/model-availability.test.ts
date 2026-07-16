@@ -87,6 +87,8 @@ describe("authenticated model availability", () => {
   });
 
   it("discovers models for providers authenticated through auth.json", async () => {
+    const original = process.env.MOONSHOT_API_KEY;
+    delete process.env.MOONSHOT_API_KEY;
     const root = await mkdtemp(path.join(tmpdir(), "strongcode-model-availability-auth-"));
     const store = new ProviderAuthStore(root);
     await store.set("kimi", { type: "api", key: "moonshot-secret-never-render" });
@@ -101,27 +103,32 @@ describe("authenticated model availability", () => {
       };
     };
 
-    const result = await discoverAuthenticatedProviderModels(configWithProviders({
-      kimi: {
-        type: "openai-compatible",
-        displayName: "Kimi",
-        apiKeyEnv: "MOONSHOT_API_KEY",
-        baseUrl: "https://api.moonshot.ai/v1",
-        modelsEndpoint: "/models",
-        enabled: false
-      },
-      mock: {
-        type: "mock",
-        displayName: "Mock",
-        apiKeyEnv: undefined,
-        baseUrl: undefined,
-        modelsEndpoint: undefined,
-        enabled: true
-      }
-    }), store, fetcher);
+    try {
+      const result = await discoverAuthenticatedProviderModels(configWithProviders({
+        kimi: {
+          type: "openai-compatible",
+          displayName: "Kimi",
+          apiKeyEnv: "MOONSHOT_API_KEY",
+          baseUrl: "https://api.moonshot.ai/v1",
+          modelsEndpoint: "/models",
+          enabled: false
+        },
+        mock: {
+          type: "mock",
+          displayName: "Mock",
+          apiKeyEnv: undefined,
+          baseUrl: undefined,
+          modelsEndpoint: undefined,
+          enabled: true
+        }
+      }), store, fetcher);
 
-    expect(result.config.models["kimi-k2"]).toMatchObject({ provider: "kimi", model: "kimi-k2", enabled: true });
-    expect(JSON.stringify(result.config)).not.toContain("moonshot-secret-never-render");
+      expect(result.config.models["kimi-k2"]).toMatchObject({ provider: "kimi", model: "kimi-k2", enabled: true });
+      expect(JSON.stringify(result.config)).not.toContain("moonshot-secret-never-render");
+    } finally {
+      if (original === undefined) delete process.env.MOONSHOT_API_KEY;
+      else process.env.MOONSHOT_API_KEY = original;
+    }
   });
 
   it("skips unauthenticated and unsupported providers", async () => {

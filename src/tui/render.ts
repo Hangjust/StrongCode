@@ -1,6 +1,22 @@
 import type { ProviderConfig, StrongCodeConfig } from "../config/schema";
 import type { ProviderCatalog } from "../models/catalog";
+import { getAgentDisplayName } from "../agents/registry";
 import { orderedProviders } from "../models/registry";
+import {
+  SessionTelemetry,
+  STRONGCODE_VERSION,
+  TurnReceipt,
+  compactSessionTitle,
+  fastModeLabel,
+  formatCost,
+  formatTokens,
+  reasoningLabel,
+  sanitizeChromeText,
+  sessionTelemetryLine,
+  turnReceiptLine,
+  turnStatusIcon
+} from "./ui/session-chrome";
+import { STRONGCODE_WORDMARK, STRONGCODE_WORDMARK_GAP, decodeWordmarkLine } from "./ui/wordmark";
 
 export interface TuiState {
   provider: string;
@@ -8,10 +24,21 @@ export interface TuiState {
   model?: string;
   modelDisplayName?: string;
   defaultAgent: string;
+  agentIdentity?: string;
   configPath: string;
   configMissing: boolean;
   workspace?: string;
   dataDir?: string;
+  modelOptions?: Record<string, unknown>;
+  mcpServersLoaded?: number;
+  totalTokens?: number;
+  costUsd?: number;
+}
+
+export interface TuiTranscriptMessage {
+  role: "user" | "assistant" | "system";
+  text: string;
+  receipt?: TurnReceipt;
 }
 
 export interface HomeRenderResult {
@@ -38,16 +65,7 @@ const SCREEN_WIDTH = 80;
 const SIDEBAR_WIDTH = 42;
 const SPLIT_WIDTH = 1;
 const FEED_WIDTH = SCREEN_WIDTH - SIDEBAR_WIDTH - SPLIT_WIDTH;
-const LOGO = [
-  ["██████", "██████", "█████ ", "██████", "██  ██", "██████", "██████", "██████", "█████ ", "██████"].join(" "),
-  ["██    ", "  ██  ", "██  ██", "██  ██", "███ ██", "██    ", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["█████ ", "  ██  ", "█████ ", "██  ██", "██████", "██ ███", "██    ", "██  ██", "██  ██", "█████ "].join(" "),
-  ["   ██ ", "  ██  ", "██ ██ ", "██  ██", "██ ███", "██  ██", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["██ ██ ", "  ██  ", "██  ██", "██  ██", "██  ██", "██  ██", "██    ", "██  ██", "██  ██", "██    "].join(" "),
-  ["██████", "  ██  ", "██  ██", "██████", "██  ██", "██████", "██████", "██████", "█████ ", "██████"].join(" ")
-];
-const LOGO_WIDTH = Math.max(...LOGO.map(line => line.length));
-const HOME_PROMPT_WIDTH = LOGO_WIDTH;
+const HOME_PROMPT_WIDTH = 72;
 const HOME_PROMPT_LEFT = Math.floor((SCREEN_WIDTH - HOME_PROMPT_WIDTH) / 2);
 const HOME_INPUT_COLUMN = HOME_PROMPT_LEFT + 3;
 
@@ -64,12 +82,15 @@ function visibleLength(text: string): number {
 }
 
 export function sanitizeDisplayValue(value: string | undefined, fallback = "N/A"): string {
+  return sanitizeChromeText(value ?? fallback);
+}
+
+export function sanitizeMultilineDisplayValue(value: string | undefined, fallback = "N/A"): string {
   return (value ?? fallback)
-    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b[P^_][\s\S]*?\x1b\\/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1b[ -/]*[@-~]/g, "")
-    .replace(/[\x00-\x1F\x7F-\x9F]/g, "");
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map(line => sanitizeDisplayValue(line, ""))
+    .join("\n");
 }
 
 function clip(text: string, width: number): string {
@@ -124,30 +145,34 @@ function metric(label: string, value: string, width = FEED_WIDTH): string {
 }
 
 function wrapText(message: string, width: number): string[] {
-  const words = sanitizeDisplayValue(message, "").split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [""];
-
   const lines: string[] = [];
-  let current = "";
-  for (const word of words) {
-    if (word.length > width) {
-      if (current) {
-        lines.push(current);
-        current = "";
-      }
-      for (let offset = 0; offset < word.length; offset += width) lines.push(word.slice(offset, offset + width));
+  for (const paragraph of sanitizeMultilineDisplayValue(message, "").split("\n")) {
+    const words = paragraph.split(/[\t ]+/).filter(Boolean);
+    if (words.length === 0) {
+      lines.push("");
       continue;
     }
-    const next = current ? `${current} ${word}` : word;
-    if (next.length > width) {
-      lines.push(current);
-      current = word;
-    } else {
-      current = next;
+    let current = "";
+    for (const word of words) {
+      if (word.length > width) {
+        if (current) {
+          lines.push(current);
+          current = "";
+        }
+        for (let offset = 0; offset < word.length; offset += width) lines.push(word.slice(offset, offset + width));
+        continue;
+      }
+      const next = current ? `${current} ${word}` : word;
+      if (next.length > width) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = next;
+      }
     }
+    if (current) lines.push(current);
   }
-  if (current) lines.push(current);
-  return lines;
+  return lines.length > 0 ? lines : [""];
 }
 
 function providerLabel(state: TuiState): string {
@@ -176,6 +201,31 @@ function strongCodeModelLine(state: TuiState): string {
   return `Strong Code · ${modelDisplayLabel(state)}`;
 }
 
+function telemetry(state: TuiState): SessionTelemetry {
+  return {
+    totalTokens: state.totalTokens,
+    costUsd: state.costUsd,
+    toolCalls: 0,
+    skillsRead: undefined,
+    mcpServersLoaded: state.mcpServersLoaded,
+    mcpServersUsed: undefined
+  };
+}
+
+function topBar(title: string, state: TuiState, noColor: boolean): string[] {
+  const left = `${paint("◆", STYLE.primary, noColor)} ${paint("STRONGCODE", STYLE.text, noColor)} ${paint("/", STYLE.border, noColor)} ${paint(clip(sanitizeDisplayValue(title, "New session"), 28), STYLE.muted, noColor)}`;
+  const version = paint(`v${STRONGCODE_VERSION}`, STYLE.muted, noColor);
+  const model = paint(clip(modelDisplayLabel(state), 18), STYLE.primary, noColor);
+  const usage = paint(`${formatTokens(state.totalTokens)} · ${formatCost(state.costUsd)}`, STYLE.muted, noColor);
+  const summary = paint("[ Summary F2 ]", STYLE.secondary, noColor);
+  const right = `${model}  ${usage}  ${summary}  ${version}`;
+  const leftWidth = Math.max(0, SCREEN_WIDTH - visibleLength(right) - 2);
+  return [
+    `${padVisible(left, leftWidth)}  ${right}`,
+    paint("─".repeat(SCREEN_WIDTH), STYLE.border, noColor)
+  ];
+}
+
 function splitRows(left: string[], right: string[], noColor: boolean): string {
   const height = Math.max(left.length, right.length);
   const split = paint("┃", STYLE.border, noColor);
@@ -187,12 +237,12 @@ function splitRows(left: string[], right: string[], noColor: boolean): string {
 }
 
 function footer(state: TuiState, noColor: boolean): string {
-  const directory = clip(sanitizeDisplayValue(state.workspace, "."), 32);
-  const connected = !state.configMissing;
-  const lsp = connected ? paint("•", STYLE.success, noColor) : paint("•", STYLE.muted, noColor);
-  const mcp = connected ? paint("⊙", STYLE.success, noColor) : paint("⊙", STYLE.muted, noColor);
-  const right = `${lsp} 0 LSP  ${mcp} 0 MCP  ${paint("/connect", STYLE.muted, noColor)}`;
-  return `${paint("▔", STYLE.border, noColor)} ${padVisible(paint(directory, STYLE.muted, noColor), SCREEN_WIDTH - visibleLength(right) - 2)}${right}`;
+  const directory = clip(sanitizeDisplayValue(state.workspace, "."), 28);
+  const mcpCount = state.mcpServersLoaded;
+  const quick = paint(`Quick summary · ${directory}`, STYLE.muted, noColor);
+  const loaded = mcpCount === undefined ? "— MCPs loaded" : `${mcpCount} MCP${mcpCount === 1 ? "" : "s"} loaded`;
+  const right = `${paint(loaded, STYLE.text, noColor)}  ${paint("Ctrl+H commands", STYLE.muted, noColor)}`;
+  return `${padVisible(quick, SCREEN_WIDTH - visibleLength(right))}${right}`;
 }
 
 function sidebar(title: string, state: TuiState, content: string[], noColor: boolean): string[] {
@@ -206,18 +256,34 @@ function sidebar(title: string, state: TuiState, content: string[], noColor: boo
     `  ${paint("─".repeat(SIDEBAR_WIDTH - 4), STYLE.border, noColor)}`,
     ...details.map(line => `  ${paint("›", STYLE.accent, noColor)} ${paint(clip(sanitizeDisplayValue(line, ""), SIDEBAR_WIDTH - 6), STYLE.muted, noColor)}`),
     ...Array(Math.max(0, 10 - details.length)).fill(""),
-    `  ${paint("●", STYLE.success, noColor)} ${paint("StrongCode", STYLE.text, noColor)} ${paint("0.1.0", STYLE.muted, noColor)}`,
+    `  ${paint("●", STYLE.success, noColor)} ${paint("StrongCode", STYLE.text, noColor)} ${paint(STRONGCODE_VERSION, STYLE.muted, noColor)}`,
     `  ${paint("⌁", STYLE.border, noColor)} ${paint(clip(sanitizeDisplayValue(state.workspace, "."), SIDEBAR_WIDTH - 6), STYLE.muted, noColor)}`
   ];
 }
 
 function promptBlock(state: TuiState, width: number, noColor: boolean, placeholder: string): string[] {
   const inner = width - 3;
-  const meta = strongCodeModelLine(state);
-  const accent = paint("┃", STYLE.primary, noColor);
+  const agent = getAgentDisplayName(state.agentIdentity, sanitizeDisplayValue(state.defaultAgent, "default"));
+  const model = modelDisplayLabel(state);
+  const meta = `  ${agent} · ${model} · 🧠 · ⚡`;
+  const styledMeta = noColor
+    ? padVisible(meta, inner)
+    : clip([
+      paint(`  ${agent} · `, STYLE.primary, false, STYLE.element),
+      paint(model, STYLE.text, false, STYLE.element),
+      paint(" · 🧠 · ⚡", STYLE.primary, false, STYLE.element),
+      paint(" ".repeat(Math.max(0, inner - visibleLength(meta))), STYLE.primary, false, STYLE.element)
+    ].join(""), inner);
+  const hint = "/model switch · Tab agents · Ctrl+H commands";
+  const top = `${paint("╭", STYLE.primary, noColor)}${paint("─ message ", STYLE.primary, noColor)}${paint("─".repeat(Math.max(0, width - 12)), STYLE.border, noColor)}${paint("╮", STYLE.border, noColor)}`;
+  const bottom = `${paint("╰", STYLE.border, noColor)}${paint("─".repeat(Math.max(0, width - 2)), STYLE.border, noColor)}${paint("╯", STYLE.border, noColor)}`;
   return [
-    `${accent}${paint(padVisible(`  Ask anything... \"${placeholder}\"`, inner), STYLE.muted, noColor, STYLE.element)}`,
-    `${accent}${paint(padVisible(`  ${meta}`, inner), STYLE.primary, noColor, STYLE.element)}`
+    top,
+    `${paint("│", STYLE.primary, noColor)}${paint(padVisible(`  Ask anything… “${placeholder}”`, inner), STYLE.muted, noColor, STYLE.element)}${paint(" │", STYLE.border, noColor)}`,
+    `${paint("│", STYLE.primary, noColor)}${paint(padVisible("", inner), STYLE.text, noColor, STYLE.element)}${paint(" │", STYLE.border, noColor)}`,
+    `${paint("│", STYLE.primary, noColor)}${styledMeta}${paint(" │", STYLE.border, noColor)}`,
+    `${paint("│", STYLE.primary, noColor)}${paint(padVisible(`  ${hint}`, inner), STYLE.muted, noColor, STYLE.element)}${paint(" │", STYLE.border, noColor)}`,
+    bottom
   ];
 }
 
@@ -226,36 +292,49 @@ function homePromptPrefix(noColor: boolean): string {
   return `\x1b[4A\x1b[${HOME_INPUT_COLUMN + 2}G`;
 }
 
-function userMessage(text: string, index: number, width: number, noColor: boolean): string[] {
+function userMessage(text: string, index: number, width: number, noColor: boolean, state: TuiState): string[] {
   const lines = wrapText(text, width - 4);
   const top = index === 0 ? [] : [""];
+  const destination = `Sent to ${sanitizeDisplayValue(state.defaultAgent, "default")} · ${modelDisplayLabel(state)}`;
   return [
     ...top,
     `${paint("╭", STYLE.secondary, noColor)}${rule("you", width - 1, noColor)}`,
     ...lines.map(line => `${paint("┃", STYLE.secondary, noColor)}${paint(padVisible(`  ${line}`, width - 1), STYLE.text, noColor, STYLE.panel)}`),
+    `${paint("┃", STYLE.secondary, noColor)}${paint(padVisible(`  ${destination}`, width - 1), STYLE.muted, noColor, STYLE.panel)}`,
     `${paint("╰", STYLE.secondary, noColor)}${paint("─".repeat(Math.max(0, width - 1)), STYLE.border, noColor)}`
   ];
 }
 
-function assistantMessage(text: string, state: TuiState, width: number, noColor: boolean): string[] {
+function assistantMessage(text: string, state: TuiState, width: number, noColor: boolean, receipt?: TurnReceipt): string[] {
   const lines = wrapText(text, width - 3).map(line => `   ${line}`);
+  const agent = sanitizeDisplayValue(state.defaultAgent, "default");
+  const completion: TurnReceipt = receipt ?? { status: "finished", agent, model: modelDisplayLabel(state), durationMs: Number.NaN, toolCalls: Number.NaN };
   return [
     "",
-    sectionTitle("▣", "Build", noColor),
+    sectionTitle("▣", agent, noColor),
     ...lines.map(line => paint(clip(line, width), STYLE.text, noColor)),
-    `   ${paint("▣", STYLE.secondary, noColor)} ${paint("Build", STYLE.text, noColor)}${paint(` · ${modelLabel(state)} ${providerLabel(state)}`, STYLE.muted, noColor)}`
+    `   ${paint(turnStatusIcon(completion.status), completion.status === "failed" ? STYLE.error : STYLE.success, noColor)} ${paint(clip(turnReceiptLine(completion), width - 5), STYLE.muted, noColor)}`
   ];
 }
 
-function renderTranscript(messages: string[], state: TuiState, noColor: boolean): string[] {
-  if (messages.length === 0) return [paint("No messages in session.", STYLE.muted, noColor)];
+function normalizedTranscriptMessage(message: string | TuiTranscriptMessage): TuiTranscriptMessage {
+  if (typeof message !== "string") return { ...message, text: sanitizeMultilineDisplayValue(message.text, "") };
+  const safe = sanitizeMultilineDisplayValue(message, "");
+  if (safe.startsWith("user: ")) return { role: "user", text: safe.slice(6) };
+  if (safe.startsWith("assistant: ")) return { role: "assistant", text: safe.slice(11) };
+  if (safe.startsWith("system: ")) return { role: "system", text: safe.slice(8) };
+  return { role: "assistant", text: safe };
+}
+
+function renderTranscript(messages: Array<string | TuiTranscriptMessage>, state: TuiState, noColor: boolean): string[] {
+  if (messages.length === 0) return [paint("Ready for your first message.", STYLE.muted, noColor)];
 
   return messages.flatMap((message, index) => {
-    const safe = sanitizeDisplayValue(message, "");
-    if (safe.startsWith("user: ")) return userMessage(safe.slice(6), index, FEED_WIDTH, noColor);
-    if (safe.startsWith("assistant: ")) return assistantMessage(safe.slice(11), state, FEED_WIDTH, noColor);
-    return assistantMessage(safe, state, FEED_WIDTH, noColor);
-  }).slice(-20);
+    const entry = normalizedTranscriptMessage(message);
+    if (entry.role === "user") return userMessage(entry.text, index, SCREEN_WIDTH, noColor, state);
+    if (entry.role === "system") return ["", `${paint("!", STYLE.warning, noColor)} ${paint(clip(entry.text, SCREEN_WIDTH - 2), STYLE.warning, noColor)}`];
+    return assistantMessage(entry.text, state, SCREEN_WIDTH, noColor, entry.receipt);
+  }).slice(-32);
 }
 
 export function renderHome(state: TuiState, noColor: boolean = false): string {
@@ -264,12 +343,15 @@ export function renderHome(state: TuiState, noColor: boolean = false): string {
 
 export function renderHomeWithPrompt(state: TuiState, noColor: boolean = false): HomeRenderResult {
   const prompt = promptBlock(state, HOME_PROMPT_WIDTH, noColor, "Fix a TODO in the codebase");
+  const wordmark = STRONGCODE_WORDMARK.left.map((left, index) => {
+    const leftHalf = paint(decodeWordmarkLine(left), STYLE.muted, noColor);
+    const rightHalf = paint(decodeWordmarkLine(STRONGCODE_WORDMARK.right[index] ?? ""), STYLE.primary, noColor);
+    return center(`${leftHalf}${" ".repeat(STRONGCODE_WORDMARK_GAP)}${rightHalf}`);
+  });
   const lines = [
+    ...topBar("Ready when you are", state, noColor),
     "",
-    "",
-    ...LOGO.map(line => center(paint(line, STYLE.primary, noColor))),
-    "",
-    "",
+    ...wordmark,
     "",
     ...prompt.map(line => center(line)),
     "",
@@ -281,17 +363,18 @@ export function renderHomeWithPrompt(state: TuiState, noColor: boolean = false):
   };
 }
 
-export function renderSessionLayout(state: TuiState, messages: string[], noColor: boolean = false): string {
-  const left = [
-    "",
-    sectionTitle("◆", "Session", noColor),
-    rule("transcript", FEED_WIDTH, noColor),
+export function renderSessionLayout(state: TuiState, messages: Array<string | TuiTranscriptMessage>, noColor: boolean = false): string {
+  const firstUser = messages.map(normalizedTranscriptMessage).find(message => message.role === "user")?.text;
+  const lines = [
+    ...topBar(compactSessionTitle(firstUser ?? "New session"), state, noColor),
+    paint(` ${sessionTelemetryLine(telemetry(state))} · Active ${sanitizeDisplayValue(state.defaultAgent, "default")} / ${modelDisplayLabel(state)}`, STYLE.muted, noColor),
+    rule("transcript", SCREEN_WIDTH, noColor),
     ...renderTranscript(messages, state, noColor),
     "",
-    ...promptBlock(state, FEED_WIDTH, noColor, "What is the tech stack of this project?")
+    ...promptBlock(state, SCREEN_WIDTH, noColor, "What should we build next?"),
+    footer(state, noColor)
   ];
-  const right = sidebar("local", state, [], noColor);
-  return splitRows(left, right, noColor);
+  return lines.map(line => clip(line, SCREEN_WIDTH)).join("\n");
 }
 
 export function renderHints(noColor: boolean = false): string {
@@ -300,9 +383,10 @@ export function renderHints(noColor: boolean = false): string {
     rule("navigation", SCREEN_WIDTH, noColor),
     "  /connect    Connect provider auth",
     "  /model      Show and switch models",
+    "  /help       Show commands and shortcuts",
     "",
     sectionTitle("◆", "Prompt Grammar", noColor),
-    "  @ files   ! shell mode   / commands"
+    "  @ files   ! shell mode   / commands   Ctrl+H / F1 help"
   ];
   return lines.map(line => clip(line, SCREEN_WIDTH)).join("\n");
 }
@@ -396,15 +480,17 @@ export function renderConnectPanel(config: StrongCodeConfig, state: TuiState, no
     `Connected ${sanitizeDisplayValue(connected, "none")}`,
     "",
     "Use /connect <provider-id> <api-key>",
-    "Use /connect openai chatgpt-browser",
-    "Use /connect openai chatgpt-headless",
+    "Use strongcode setup --force for ChatGPT login",
     "Use /connect remove <provider-id>",
     "",
     ...orderedProviders(config.providers).map(provider => {
       const catalogProvider = catalog?.all.find(item => item.id === provider.id);
       const marker = catalogProvider?.connected ? "●" : "○";
       const runtime = catalogProvider?.runtimeSupport ?? "supported";
-      return `${marker} ${sanitizeDisplayValue(provider.id, "unknown")} · ${runtime}`;
+      const origin = provider.config.baseUrl
+        ? (() => { try { return new URL(provider.config.baseUrl).origin; } catch { return "invalid endpoint"; } })()
+        : "no remote endpoint";
+      return clipDisplayLine(`${marker} ${sanitizeDisplayValue(provider.id, "unknown")} · ${origin} · ${runtime}`, FEED_WIDTH);
     }),
     "",
     ...promptBlock(state, FEED_WIDTH, noColor, "Connect a provider")

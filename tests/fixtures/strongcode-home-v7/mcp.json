@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "defaults": {
+    "autoStart": false,
+    "timeout": {
+      "startupMs": 15000,
+      "requestMs": 60000
+    },
+    "environment": {
+      "inherit": false,
+      "allowlist": [
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "TMP",
+        "TEMP"
+      ]
+    },
+    "stderrFile": "logs/mcp-stderr.log"
+  },
+  "mcpServers": {
+    "context7": {
+      "enabled": true,
+      "autoStart": true,
+      "type": "remote",
+      "description": "Current library and API documentation.",
+      "readOnly": true,
+      "url": "https://mcp.context7.com/mcp",
+      "headersFromEnv": {
+        "CONTEXT7_API_KEY": {
+          "env": "CONTEXT7_API_KEY",
+          "required": false
+        }
+      },
+      "oauth": false
+    },
+    "grep_app": {
+      "enabled": true,
+      "autoStart": true,
+      "type": "remote",
+      "description": "Public GitHub code search powered by grep.app.",
+      "readOnly": true,
+      "url": "https://mcp.grep.app",
+      "oauth": false
+    },
+    "exa": {
+      "enabled": true,
+      "autoStart": true,
+      "type": "remote",
+      "description": "Primary current-web search and content fetch provider.",
+      "readOnly": true,
+      "url": "https://mcp.exa.ai/mcp",
+      "headersFromEnv": {
+        "Authorization": {
+          "env": "EXA_API_KEY",
+          "prefix": "Bearer ",
+          "required": false
+        }
+      },
+      "oauth": false
+    },
+    "tinyfish": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "remote",
+      "description": "OAuth-backed web search, extraction, and browser automation; web-search fallback after Exa.",
+      "readOnly": false,
+      "url": "https://agent.tinyfish.ai/mcp",
+      "oauth": true
+    },
+    "semble": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "local",
+      "description": "Token-efficient semantic and lexical workspace code search.",
+      "readOnly": true,
+      "timeout": {
+        "startupMs": 60000,
+        "requestMs": 60000
+      },
+      "command": [
+        "uvx",
+        "--from",
+        "semble[mcp]==0.5.0",
+        "semble",
+        "--content",
+        "all"
+      ],
+      "environmentFromEnv": [
+        "SEMBLE_CACHE_LOCATION"
+      ],
+      "tokenSaver": "caveman-shrink"
+    },
+    "graphify": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "local",
+      "description": "Queryable project knowledge graph when graphify-out/graph.json exists.",
+      "readOnly": true,
+      "timeout": {
+        "startupMs": 120000,
+        "requestMs": 60000
+      },
+      "requiredFiles": [
+        "graphify-out/graph.json"
+      ],
+      "command": [
+        "uvx",
+        "--from",
+        "graphifyy[mcp]==0.9.11",
+        "python",
+        "-m",
+        "graphify.serve",
+        "graphify-out/graph.json"
+      ],
+      "tokenSaver": "caveman-shrink"
+    },
+    "playwright": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "local",
+      "description": "Isolated headless browser automation through Microsoft's Playwright MCP.",
+      "readOnly": false,
+      "timeout": {
+        "startupMs": 60000,
+        "requestMs": 60000
+      },
+      "command": [
+        "npx",
+        "-y",
+        "@playwright/mcp@0.0.78",
+        "--headless",
+        "--isolated",
+        "--block-service-workers",
+        "--image-responses",
+        "omit"
+      ]
+    },
+    "github": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "remote",
+      "description": "GitHub's official hosted MCP server.",
+      "readOnly": false,
+      "requiredEnv": [
+        "GITHUB_PERSONAL_ACCESS_TOKEN"
+      ],
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headersFromEnv": {
+        "Authorization": {
+          "env": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "prefix": "Bearer ",
+          "required": true
+        }
+      },
+      "oauth": false
+    },
+    "headroom": {
+      "enabled": true,
+      "autoStart": false,
+      "type": "local",
+      "description": "Local reversible tool-output compression and token-savings statistics.",
+      "readOnly": false,
+      "timeout": {
+        "startupMs": 120000,
+        "requestMs": 120000
+      },
+      "command": [
+        "uvx",
+        "--from",
+        "headroom-ai[mcp]==0.31.0",
+        "headroom",
+        "mcp",
+        "serve"
+      ],
+      "environmentFromEnv": [
+        "HEADROOM_STORE_URL",
+        "HEADROOM_DEFAULT_MODE",
+        "HEADROOM_MODEL_LIMITS",
+        "HEADROOM_TELEMETRY"
+      ]
+    },
+    "brave": {
+      "enabled": false,
+      "autoStart": false,
+      "type": "local",
+      "description": "Optional Brave Search fallback; opt in and provide BRAVE_API_KEY.",
+      "readOnly": true,
+      "timeout": {
+        "startupMs": 60000,
+        "requestMs": 60000
+      },
+      "requiredEnv": [
+        "BRAVE_API_KEY"
+      ],
+      "command": [
+        "npx",
+        "-y",
+        "@brave/brave-search-mcp-server@2.0.82",
+        "--transport",
+        "stdio",
+        "--enabled-tools",
+        "brave_web_search"
+      ],
+      "environmentFromEnv": [
+        "BRAVE_API_KEY"
+      ]
+    }
+  },
+  "webSearch": {
+    "providers": [
+      {
+        "server": "exa",
+        "tool": "web_search_exa",
+        "queryParameter": "query",
+        "enabled": true
+      },
+      {
+        "server": "tinyfish",
+        "tool": "search",
+        "queryParameter": "query",
+        "enabled": true
+      },
+      {
+        "server": "brave",
+        "tool": "brave_web_search",
+        "queryParameter": "query",
+        "enabled": false
+      }
+    ]
+  },
+  "templates": {
+    "local-stdio": {
+      "enabled": false,
+      "type": "local",
+      "command": [
+        "replace-with-executable"
+      ],
+      "environmentFromEnv": []
+    },
+    "remote-http": {
+      "enabled": false,
+      "type": "remote",
+      "url": "https://example.invalid/mcp",
+      "headersFromEnv": {},
+      "oauth": false
+    },
+    "duckduckgo-search-only": {
+      "enabled": false,
+      "note": "Add a reviewed DuckDuckGo search-only MCP command here; StrongCode does not auto-install an unaffiliated package."
+    },
+    "self-hosted-firecrawl": {
+      "enabled": false,
+      "note": "Add your self-hosted Firecrawl MCP endpoint as an HTTPS remote server and opt it into webSearch.providers."
+    },
+    "self-hosted-searxng": {
+      "enabled": false,
+      "note": "Add your self-hosted SearXNG MCP endpoint as an HTTPS remote server and opt it into webSearch.providers."
+    }
+  }
+}

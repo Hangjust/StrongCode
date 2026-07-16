@@ -1,13 +1,25 @@
 {
   "name": "strongcode",
   "version": "0.1.0",
-  "description": "A minimal local agent harness scaffold for Node 20.",
+  "description": "A secure terminal-first local agent harness with one-time model-provider onboarding.",
   "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "strongcode.config.example.yaml",
+    "Code Smarter.gif"
+  ],
   "bin": {
-    "strongcode": "./dist/cli.js"
+    "strongcode": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "postinstall": "node -e \"console.log('StrongCode installed. Run strongcode setup to make the harness ready.')\"",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run"
   },
@@ -15,10 +27,13 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opentui/core": "^0.3.1",
     "@opentui/keymap": "^0.3.1",
     "@opentui/solid": "^0.3.1",
+    "@vscode/ripgrep": "^1.18.0",
     "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
     "solid-js": "^1.9.12",
     "yaml": "^2.8.0",
     "zod": "^3.25.0"

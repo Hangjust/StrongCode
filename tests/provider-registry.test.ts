@@ -41,7 +41,7 @@ describe("provider registry", () => {
     expect(custom?.models.map(model => model.id)).toEqual(["custom-model"]);
     expect(custom?.modelCapabilities["custom-model"]).toEqual(["chat"]);
     expect(custom?.runtimeSupport).toBe("supported");
-    expect(anthropic?.runtimeSupport).toBe("catalog-only");
+    expect(anthropic?.runtimeSupport).toBe("supported");
   });
 
   it("exposes OpenCode-style provider auth methods with API-key fallback", async () => {
@@ -60,12 +60,16 @@ describe("provider registry", () => {
 
     const service = new ProviderService(config, new ProviderAuthStore(dataDir));
 
-    expect(service.authMethods().openai).toEqual([{ type: "oauth", label: "ChatGPT Plus/Pro" }, { type: "api", label: "Manually enter API Key" }]);
+    expect(service.authMethods().openai).toEqual([{ type: "api", label: "API key" }]);
+    expect(service.authMethods().chatgpt).toEqual([
+      { id: "browser", type: "oauth", label: "ChatGPT browser login" },
+      { id: "device-code", type: "oauth", label: "ChatGPT headless/device-code login" }
+    ]);
     expect(service.authMethods().custom).toEqual([{ type: "api", label: "API key" }]);
     expect(service.authMethods().mock).toBeUndefined();
   });
 
-  it("marks OpenAI connected with ChatGPT OAuth auth", () => {
+  it("keeps OpenAI API auth separate from native ChatGPT OAuth", () => {
     const providers = providerDefaults();
     const catalog = createProviderCatalog({
       version: 1 as const,
@@ -77,13 +81,16 @@ describe("provider registry", () => {
       models: { mock: { provider: "mock", model: "mock", displayName: undefined, enabled: true, source: undefined, options: undefined } },
       permissions: { tools: {} }
     }, {
-      openai: { type: "oauth", access: "access-token", refresh: "refresh-token", expires: Date.now() + 1000, accountId: "account-123" }
+      chatgpt: { type: "oauth", access: "chatgpt-access", refresh: "chatgpt-refresh" }
     });
 
     const openai = catalog.all.find(provider => provider.id === "openai");
+    const chatgpt = catalog.all.find(provider => provider.id === "chatgpt");
 
-    expect(openai?.connected).toBe(true);
-    expect(openai?.authMethods).toEqual(["api_key", "oauth"]);
-    expect(catalog.connected).toContain("openai");
+    expect(openai?.connected).toBe(false);
+    expect(openai?.authMethods).toEqual(["api_key"]);
+    expect(chatgpt?.connected).toBe(true);
+    expect(chatgpt?.authMethods).toEqual(["oauth"]);
+    expect(catalog.connected).toContain("chatgpt");
   });
 });

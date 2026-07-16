@@ -1,4 +1,10 @@
-export type RuntimeEventType = "run_started" | "tool_started" | "tool_finished" | "run_finished";
+export type RuntimeEventType =
+  | "run_started"
+  | "tool_started"
+  | "tool_finished"
+  | "run_finished"
+  | "run_failed"
+  | "run_cancelled";
 
 export interface RuntimeEvent {
   type: RuntimeEventType;

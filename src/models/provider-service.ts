@@ -2,8 +2,7 @@ import type { StrongCodeConfig } from "../config/schema";
 import { StrongCodeError } from "../core/errors";
 import type { ProviderAuth, ProviderAuthReader } from "./auth-store";
 import { ProviderAuthStore } from "./auth-store";
-import { createProviderCatalog, ProviderAuthMethod, ProviderCatalog } from "./catalog";
-import { ChatGptOAuthOptions, startChatGptBrowserAuth, startChatGptHeadlessAuth } from "./chatgpt-oauth";
+import { createProviderCatalog, providerAuthMethods, ProviderAuthMethod, ProviderCatalog } from "./catalog";
 
 export interface ProviderAuthPromptBase {
   key: string;
@@ -24,34 +23,51 @@ export interface ProviderAuthSelectPrompt extends ProviderAuthPromptBase {
 export type ProviderAuthPrompt = ProviderAuthTextPrompt | ProviderAuthSelectPrompt;
 
 export interface ProviderAuthMethodDetail {
-  type: "api" | "oauth";
+  id?: string;
+  type: "api" | "oauth" | "none" | "delegated";
   label: string;
   prompts?: ProviderAuthPrompt[];
 }
 
 export type ProviderAuthMethods = Record<string, ProviderAuthMethodDetail[]>;
 
+export interface ProviderServiceOptions {
+  allowEnvironmentCredentials?: boolean;
+}
+
 export class ProviderService {
-  constructor(private readonly config: StrongCodeConfig, private readonly authStore: ProviderAuthStore, private readonly oauthOptions: ChatGptOAuthOptions = {}) {}
+  constructor(
+    private readonly config: StrongCodeConfig,
+    private readonly authStore: ProviderAuthStore,
+    private readonly options: ProviderServiceOptions = {}
+  ) {}
 
   async listProviders(): Promise<ProviderCatalog> {
-    return createProviderCatalog(this.config, await this.authStore.all());
+    return createProviderCatalog(this.config, await this.authStore.all(), {
+      allowEnvironmentCredentials: this.options.allowEnvironmentCredentials
+    });
   }
 
   listAuthMethods(providerId: string): ProviderAuthMethod[] {
     const provider = this.config.providers[providerId];
     if (!provider) throw new StrongCodeError("CONFIG_ERROR", `Provider '${providerId}' is not defined`);
-    if (provider.type === "mock") return ["none"];
-    if (provider.type === "openai") return ["api_key", "oauth"];
-    return ["api_key"];
+    return providerAuthMethods(providerId, provider);
   }
 
   authMethods(): ProviderAuthMethods {
     const methods: ProviderAuthMethods = {};
     for (const [providerId, provider] of Object.entries(this.config.providers)) {
       if (provider.type === "mock") continue;
-      methods[providerId] = provider.type === "openai"
-        ? [{ type: "oauth", label: "ChatGPT Plus/Pro" }, { type: "api", label: "Manually enter API Key" }]
+      const available = providerAuthMethods(providerId, provider);
+      methods[providerId] = available.includes("none")
+        ? [{ type: "none", label: "No credentials (local)" }]
+        : available.includes("oauth")
+        ? [
+          { id: "browser", type: "oauth", label: "ChatGPT browser login" },
+          { id: "device-code", type: "oauth", label: "ChatGPT headless/device-code login" }
+        ]
+        : available.includes("delegated")
+        ? [{ type: "delegated", label: "Google Application Default Credentials" }]
         : [{ type: "api", label: "API key" }];
     }
     return methods;
@@ -67,19 +83,6 @@ export class ProviderService {
     await this.authStore.remove(providerId);
   }
 
-  async authorizeOAuth(providerId: string): Promise<{ url: string; instructions: string }> {
-    const provider = this.config.providers[providerId];
-    if (!provider) throw new StrongCodeError("CONFIG_ERROR", `Provider '${providerId}' is not defined`);
-    if (provider.type !== "openai") throw new StrongCodeError("CONFIG_ERROR", `OAuth for provider '${providerId}' is not supported`);
-    return startChatGptBrowserAuth(providerId, this.authStore, this.oauthOptions);
-  }
-
-  async callbackOAuth(providerId: string): Promise<{ url: string; instructions: string }> {
-    const provider = this.config.providers[providerId];
-    if (!provider) throw new StrongCodeError("CONFIG_ERROR", `Provider '${providerId}' is not defined`);
-    if (provider.type !== "openai") throw new StrongCodeError("CONFIG_ERROR", `OAuth callback for provider '${providerId}' is not supported`);
-    return startChatGptHeadlessAuth(providerId, this.authStore, this.oauthOptions);
-  }
 }
 
 export async function listProviders(config: StrongCodeConfig, authStore: ProviderAuthReader): Promise<ProviderCatalog> {

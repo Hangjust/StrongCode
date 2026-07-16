@@ -1,12 +1,13 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { StrongCodeConfig, modelConfigSchema, providerConfigSchema } from "../config/schema";
 import { StrongCodeError } from "../core/errors";
+import { readVerifiedRegularFile, revalidatePath, type PathReceipt } from "../core/path-identity";
 import { isSecretLikeConfigKey } from "../config/security";
 import { providerDefaults } from "./registry";
 
 export const DEFAULT_MODEL_CATALOG_FILE = "models.json";
+const MAX_MODEL_CATALOG_BYTES = 5 * 1024 * 1024;
 
 type JsonObject = Record<string, unknown>;
 
@@ -15,6 +16,10 @@ export interface ModelCatalogLoadResult {
   path: string;
   loaded: boolean;
 }
+
+export type ModelCatalogLoadOptions = {
+  readonly automaticHomeReceipt?: PathReceipt;
+};
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -32,7 +37,7 @@ function recordValue(value: unknown): JsonObject | undefined {
   return isObject(value) ? value : undefined;
 }
 
-function definedEntries<T extends Record<string, unknown>>(value: T): Partial<T> {
+function definedEntries<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, nestedValue]) => nestedValue !== undefined)) as Partial<T>;
 }
 
@@ -62,6 +67,7 @@ function providerTypeFor(providerId: string, value: JsonObject): string {
   if (providerId === "mock") return "mock";
   if (providerId === "openai") return "openai";
   if (providerId === "anthropic") return "anthropic";
+  if (providerId === "google") return "google";
   return "openai-compatible";
 }
 
@@ -166,13 +172,40 @@ function mergeCatalog(config: StrongCodeConfig, catalog: unknown, catalogPath: s
   };
 }
 
-export async function loadJsonModelCatalog(config: StrongCodeConfig, configDirectory: string): Promise<ModelCatalogLoadResult> {
+export async function loadJsonModelCatalog(
+  config: StrongCodeConfig,
+  configDirectory: string,
+  options: ModelCatalogLoadOptions = {}
+): Promise<ModelCatalogLoadResult> {
   const catalogPath = modelCatalogPath(configDirectory, config);
-  if (!existsSync(catalogPath)) return { config, path: catalogPath, loaded: false };
+  let stats;
+  try {
+    stats = await lstat(catalogPath);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return { config, path: catalogPath, loaded: false };
+    }
+    throw new StrongCodeError("CONFIG_ERROR", `Failed to inspect model catalog ${catalogPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) {
+    throw new StrongCodeError("CONFIG_ERROR", `Refusing to load non-regular model catalog: ${catalogPath}`);
+  }
+  if (stats.size > MAX_MODEL_CATALOG_BYTES) {
+    throw new StrongCodeError("CONFIG_ERROR", `Model catalog exceeds ${MAX_MODEL_CATALOG_BYTES} bytes: ${catalogPath}`);
+  }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await readFile(catalogPath, "utf8"));
+    if (options.automaticHomeReceipt !== undefined) {
+      await revalidatePath(options.automaticHomeReceipt);
+      const bytes = await readVerifiedRegularFile(catalogPath, {
+        maxBytes: BigInt(MAX_MODEL_CATALOG_BYTES),
+        requireSingleLink: true
+      });
+      parsed = JSON.parse(bytes.toString("utf8"));
+    } else {
+      parsed = JSON.parse(await readFile(catalogPath, "utf8"));
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new StrongCodeError("CONFIG_ERROR", `Failed to read model catalog ${catalogPath}: ${message}`);

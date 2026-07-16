@@ -1,20 +1,28 @@
-import { ProviderConfig, ModelConfig } from "../config/schema";
+import type { ProviderConfig, ModelConfig } from "../config/schema";
 import { StrongCodeError } from "../core/errors";
-import { Message, Role, ToolCall } from "../core/types";
+import type { ConversationItem } from "../core/types";
 import { resolveProviderCredentials } from "./credentials";
 import type { ProviderAuthReader } from "./auth-store";
 import { buildProviderUrl } from "./provider-url";
-import { ModelProvider, ModelRequest, ModelResponse } from "./provider";
-import { CHATGPT_CODEX_ENDPOINT } from "./chatgpt-oauth";
+import { modelRequestItems, type ModelProvider, type ModelRequest, type ModelResponse } from "./provider";
+import type { ProviderResponseBody } from "./response-body";
+import { MAX_COMPLETION_RESPONSE_BYTES, readBoundedResponseText } from "./response-body";
+import { parseOpenAICompatibleErrorDetails, parseOpenAICompatibleResponse } from "./openai-compatible-response";
 
-type ChatRole = "system" | "user" | "assistant";
+type ChatRole = "system" | "user" | "assistant" | "tool";
 
 interface ChatMessage {
-  role: ChatRole;
-  content: string;
+  readonly role: ChatRole;
+  readonly content: string | null;
+  readonly tool_calls?: readonly {
+    readonly id: string;
+    readonly type: "function";
+    readonly function: { readonly name: string; readonly arguments: string };
+  }[];
+  readonly tool_call_id?: string;
 }
 
-interface OpenAICompatibleFetchResponse {
+interface OpenAICompatibleFetchResponse extends ProviderResponseBody {
   ok: boolean;
   status: number;
   statusText?: string;
@@ -25,29 +33,8 @@ export type OpenAICompatibleFetcher = (url: string, init: {
   method: "POST";
   headers: Record<string, string>;
   body: string;
+  signal?: AbortSignal;
 }) => Promise<OpenAICompatibleFetchResponse>;
-
-interface OpenAIChoiceMessage {
-  content?: unknown;
-  tool_calls?: unknown;
-}
-
-interface OpenAIChoice {
-  message?: OpenAIChoiceMessage;
-}
-
-interface OpenAIResponseBody {
-  choices?: OpenAIChoice[];
-}
-
-interface OpenAIErrorBody {
-  error?: {
-    type?: unknown;
-    message?: unknown;
-    param?: unknown;
-    code?: unknown;
-  };
-}
 
 export interface OpenAICompatibleProviderOptions {
   providerId: string;
@@ -56,6 +43,7 @@ export interface OpenAICompatibleProviderOptions {
   modelConfig: ModelConfig;
   fetcher?: OpenAICompatibleFetcher;
   authStore?: ProviderAuthReader;
+  allowEnvironmentCredentials?: boolean;
 }
 
 function buildChatCompletionsUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">): string {
@@ -69,8 +57,7 @@ function buildChatCompletionsUrl(providerId: string, providerConfig: Pick<Provid
   }
 }
 
-function completionUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">, credentialType: "api" | "oauth"): string {
-  if (providerId === "openai" && credentialType === "oauth") return CHATGPT_CODEX_ENDPOINT;
+function completionUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">): string {
   return buildChatCompletionsUrl(providerId, providerConfig);
 }
 
@@ -80,39 +67,61 @@ function globalOpenAICompatibleFetchTransport(): OpenAICompatibleFetcher {
       throw new StrongCodeError("MODEL_ERROR", "Global fetch is not available for chat completions");
     }
 
-    const response = await fetch(url, init);
-    return {
-      ok: response.ok,
-      status: response.status,
-      statusText: response.statusText,
-      text: () => response.text()
-    };
+    return fetch(url, init);
   };
 }
 
-function roleToChatRole(role: Role): ChatRole {
-  if (role === "assistant") {
-    return "assistant";
+function toChatMessages(request: ModelRequest, items: readonly ConversationItem[]): ChatMessage[] {
+  const chatMessages: ChatMessage[] = [];
+  for (const item of items) {
+    switch (item.type) {
+      case "text": {
+        if (item.role === "tool") {
+          throw new StrongCodeError("VALIDATION_ERROR", "Flat tool text requires a correlated tool_result item");
+        }
+        const content = item.content.trim();
+        if (content.length > 0) chatMessages.push({ role: item.role, content });
+        break;
+      }
+      case "tool_call": {
+        const argumentsText = JSON.stringify(item.input);
+        if (argumentsText === undefined) {
+          throw new StrongCodeError("VALIDATION_ERROR", `Tool call '${item.callId}' input is not JSON serializable`);
+        }
+        const toolCall = {
+          id: item.callId,
+          type: "function" as const,
+          function: { name: item.name, arguments: argumentsText }
+        };
+        const previous = chatMessages[chatMessages.length - 1];
+        if (previous?.role === "assistant") {
+          chatMessages[chatMessages.length - 1] = {
+            ...previous,
+            tool_calls: [...(previous.tool_calls ?? []), toolCall]
+          };
+        } else {
+          chatMessages.push({ role: "assistant", content: null, tool_calls: [toolCall] });
+        }
+        break;
+      }
+      case "tool_result":
+        chatMessages.push({ role: "tool", tool_call_id: item.callId, content: item.content });
+        break;
+    }
   }
 
-  return "user";
-}
-
-function toChatMessages(messages: Message[], prompt: string): ChatMessage[] {
-  const chatMessages = messages
-    .map(message => ({ role: roleToChatRole(message.role), content: message.content.trim() }))
-    .filter(message => message.content.length > 0);
-
-  const promptContent = prompt.trim();
+  const promptContent = request.prompt.trim();
   if (promptContent.length > 0 && !chatMessages.some(message => message.role === "user" && message.content === promptContent)) {
     chatMessages.push({ role: "user", content: promptContent });
   }
 
   if (chatMessages.length === 0) {
-    return [{ role: "user", content: prompt }];
+    chatMessages.push({ role: "user", content: request.prompt });
   }
 
-  return chatMessages;
+  return request.systemPrompt
+    ? [{ role: "system", content: request.systemPrompt }, ...chatMessages]
+    : chatMessages;
 }
 
 function redactSensitive(value: string, apiKey: string): string {
@@ -122,104 +131,17 @@ function redactSensitive(value: string, apiKey: string): string {
   }
 
   return redacted
+    .replace(/(^|[^A-Za-z0-9_-])(authorization[ \t]*[:=][ \t]*)[^ \t\r\n,;}'"]+[ \t]+[^ \t\r\n,;}'"]+/gi, "$1$2[redacted]")
+    .replace(/(^|[^A-Za-z0-9_-])(authorization[ \t]*[:=][ \t]*)[^ \t\r\n,;}'"]+/gi, "$1$2[redacted]")
     .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
-    .replace(/(authorization\s*[:=]\s*)[^\s,;}]+/gi, "$1[redacted]")
     .replace(/((?:api[-_]?key|x-api-key)\s*[:=]\s*)[^\s,;}]+/gi, "$1[redacted]");
 }
 
-function tryParseJson(text: string): unknown {
-  if (text.trim().length === 0) {
-    return undefined;
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch (error) {
-    return undefined;
-  }
-}
-
-function stringField(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
 function formatProviderError(response: OpenAICompatibleFetchResponse, responseText: string, apiKey: string): string {
-  const payload = tryParseJson(responseText);
-  if (payload && typeof payload === "object") {
-    const error = (payload as OpenAIErrorBody).error;
-    if (error && typeof error === "object") {
-      const parts = [
-        stringField(error.type),
-        stringField(error.message),
-        stringField(error.param),
-        stringField(error.code)
-      ];
-      const detail = parts.filter((part): part is string => Boolean(part)).join("; ");
-      if (detail.length > 0) {
-        return redactSensitive(detail, apiKey);
-      }
-    }
-  }
+  const detail = parseOpenAICompatibleErrorDetails(responseText).join("; ");
+  if (detail.length > 0) return redactSensitive(detail, apiKey);
 
   return response.statusText ? redactSensitive(response.statusText, apiKey) : "request failed";
-}
-
-function parseToolCalls(value: unknown): ToolCall[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  const toolCalls: ToolCall[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== "object") {
-      return [];
-    }
-
-    const functionValue = (item as { function?: unknown }).function;
-    if (!functionValue || typeof functionValue !== "object") {
-      return [];
-    }
-
-    const name = (functionValue as { name?: unknown }).name;
-    const argumentsValue = (functionValue as { arguments?: unknown }).arguments;
-    if (typeof name !== "string" || name.length === 0 || typeof argumentsValue !== "string") {
-      return [];
-    }
-
-    let input: unknown;
-    try {
-      input = JSON.parse(argumentsValue);
-    } catch (error) {
-      return [];
-    }
-
-    toolCalls.push({ name, input });
-  }
-
-  return toolCalls;
-}
-
-function parseCompletionResponse(responseText: string): ModelResponse {
-  const payload = tryParseJson(responseText);
-  if (!payload || typeof payload !== "object") {
-    throw new StrongCodeError("MODEL_ERROR", "Model completion response must be valid JSON");
-  }
-
-  const choices = (payload as OpenAIResponseBody).choices;
-  const message = choices?.[0]?.message;
-  if (!message || typeof message !== "object") {
-    throw new StrongCodeError("MODEL_ERROR", "Model completion response must include choices[0].message");
-  }
-
-  const toolCalls = parseToolCalls(message.tool_calls);
-  if (message.content !== null && typeof message.content !== "string") {
-    throw new StrongCodeError("MODEL_ERROR", "Model completion response must include choices[0].message.content");
-  }
-
-  return {
-    message: message.content ?? "",
-    toolCalls
-  };
 }
 
 export class OpenAICompatibleModelProvider implements ModelProvider {
@@ -232,11 +154,31 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
-    const credentials = await resolveProviderCredentials(this.options.providerId, this.options.providerConfig, { authStore: this.options.authStore });
-    const url = completionUrl(this.options.providerId, this.options.providerConfig, credentials.type);
+    request.signal?.throwIfAborted();
+    const messages = toChatMessages(request, modelRequestItems(request));
+    const credentials = await resolveProviderCredentials(this.options.providerId, this.options.providerConfig, {
+      authStore: this.options.authStore,
+      allowEnvironmentCredentials: this.options.allowEnvironmentCredentials
+    });
+    request.signal?.throwIfAborted();
+    const url = completionUrl(this.options.providerId, this.options.providerConfig);
     const body = JSON.stringify({
       model: this.options.modelConfig.model ?? this.options.modelId,
-      messages: toChatMessages(request.messages, request.prompt)
+      messages,
+      ...(request.tools.length > 0 ? {
+        tools: (request.toolDefinitions ?? request.tools.map(name => ({
+          name,
+          description: `StrongCode tool: ${name}`,
+          inputSchema: { type: "object", additionalProperties: true }
+        }))).map(tool => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.inputSchema
+          }
+        }))
+      } : {})
     });
 
     let response: OpenAICompatibleFetchResponse;
@@ -245,12 +187,14 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${credentials.type === "oauth" ? credentials.access : credentials.apiKey}`,
-          ...(credentials.type === "oauth" && credentials.accountId ? { "ChatGPT-Account-Id": credentials.accountId } : {})
+          ...(credentials.type === "api" ? { Authorization: `Bearer ${credentials.apiKey}` } : {}),
         },
-        body
+        body,
+        ...(request.signal ? { signal: request.signal } : {})
       });
+      request.signal?.throwIfAborted();
     } catch (error) {
+      if (request.signal?.aborted) throw request.signal.reason;
       if (error instanceof StrongCodeError) {
         throw error;
       }
@@ -259,12 +203,64 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
       throw new StrongCodeError("MODEL_ERROR", `Provider ${this.options.providerId} completion request failed: ${message}`);
     }
 
-    const responseText = await response.text();
+    let responseText: string;
+    const responseTooLarge = new StrongCodeError("MODEL_ERROR", "Model completion response exceeded 10 MB");
+    try {
+      const declaredLength = response.headers?.get("content-length");
+      if (declaredLength !== undefined
+        && declaredLength !== null
+        && Number.parseInt(declaredLength, 10) > MAX_COMPLETION_RESPONSE_BYTES) {
+        throw responseTooLarge;
+      }
+
+      const sourceReader = response.body?.getReader();
+      let streamedBytes = 0;
+      const boundedBody = sourceReader ? new ReadableStream<Uint8Array>({
+        async pull(controller): Promise<void> {
+          const chunk = await sourceReader.read();
+          if (chunk.done) {
+            controller.close();
+            return;
+          }
+          streamedBytes += chunk.value.byteLength;
+          if (streamedBytes > MAX_COMPLETION_RESPONSE_BYTES) {
+            try {
+              await sourceReader.cancel();
+            } catch {
+              throw responseTooLarge;
+            }
+            controller.error(responseTooLarge);
+            return;
+          }
+          controller.enqueue(chunk.value);
+        },
+        cancel(reason): Promise<void> {
+          return sourceReader.cancel(reason);
+        }
+      }) : undefined;
+      const locallyBoundedResponse: ProviderResponseBody = {
+        ...(boundedBody ? { body: boundedBody } : {}),
+        async text(): Promise<string> {
+          const text = await response.text();
+          if (new TextEncoder().encode(text).byteLength > MAX_COMPLETION_RESPONSE_BYTES) {
+            throw responseTooLarge;
+          }
+          return text;
+        }
+      };
+      responseText = await readBoundedResponseText(locallyBoundedResponse);
+      request.signal?.throwIfAborted();
+    } catch (error) {
+      if (request.signal?.aborted) throw request.signal.reason;
+      if (error === responseTooLarge) throw responseTooLarge;
+      const code = error instanceof StrongCodeError ? error.code : "MODEL_ERROR";
+      throw new StrongCodeError(code, `Provider ${this.options.providerId} completion response body read failed`);
+    }
     if (!response.ok) {
       const detail = formatProviderError(response, responseText, credentials.secret);
       throw new StrongCodeError("MODEL_ERROR", `Provider ${this.options.providerId} completion failed with HTTP ${response.status}: ${detail}`);
     }
 
-    return parseCompletionResponse(responseText);
+    return parseOpenAICompatibleResponse(responseText, response.headers?.get("x-request-id") ?? undefined);
   }
 }

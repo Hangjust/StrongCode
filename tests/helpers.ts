@@ -49,3 +49,32 @@ export async function tempWorkspace(): Promise<{ root: string; config: StrongCod
     context: createRuntimeContext(config, configPath, root)
   };
 }
+
+export async function writeOpenAICompatibleTestConfig(root: string): Promise<string> {
+  const configPath = path.join(root, "strongcode.config.yaml");
+  await writeFile(configPath, `version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: default
+providers:
+  custom:
+    type: openai-compatible
+    displayName: Custom Provider
+    baseUrl: http://127.0.0.1:8000/v1
+    modelsEndpoint: /models
+    allowUnauthenticated: true
+    enabled: true
+agents:
+  default:
+    model: custom-model
+    tools: []
+models:
+  custom-model:
+    provider: custom
+    model: provider-model
+    enabled: true
+permissions:
+  tools: {}
+`, "utf8");
+  return configPath;
+}

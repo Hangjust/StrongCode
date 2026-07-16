@@ -1,8 +1,12 @@
 version: 1
 workspace: "."
 dataDir: ".strongcode"
-defaultAgent: default
+defaultAgent: tesla
 providers:
+  chatgpt:
+    type: chatgpt
+    displayName: ChatGPT
+    enabled: false
   openai:
     type: openai
     displayName: GPT / OpenAI
@@ -21,6 +25,8 @@ providers:
     type: anthropic
     displayName: Claude
     apiKeyEnv: ANTHROPIC_API_KEY
+    baseUrl: https://api.anthropic.com/v1
+    modelsEndpoint: /models
     enabled: false
   grok:
     type: openai-compatible
@@ -28,6 +34,48 @@ providers:
     apiKeyEnv: XAI_API_KEY
     baseUrl: https://api.x.ai/v1
     modelsEndpoint: /models
+    enabled: false
+  google:
+    type: google
+    displayName: Google Gemini
+    apiKeyEnv: GEMINI_API_KEY
+    baseUrl: https://generativelanguage.googleapis.com/v1beta
+    modelsEndpoint: /models
+    enabled: false
+  deepseek:
+    type: openai-compatible
+    displayName: DeepSeek
+    apiKeyEnv: DEEPSEEK_API_KEY
+    baseUrl: https://api.deepseek.com
+    modelsEndpoint: /models
+    enabled: false
+  zhipu:
+    type: openai-compatible
+    displayName: Z.AI / GLM
+    apiKeyEnv: ZAI_API_KEY
+    baseUrl: https://api.z.ai/api/paas/v4
+    modelsEndpoint: /models
+    enabled: false
+  ollama:
+    type: openai-compatible
+    displayName: Ollama (local)
+    baseUrl: http://127.0.0.1:11434/v1
+    modelsEndpoint: /models
+    allowUnauthenticated: true
+    enabled: false
+  lmstudio:
+    type: openai-compatible
+    displayName: LM Studio (local)
+    baseUrl: http://127.0.0.1:1234/v1
+    modelsEndpoint: /models
+    allowUnauthenticated: true
+    enabled: false
+  vllm:
+    type: openai-compatible
+    displayName: vLLM (local)
+    baseUrl: http://127.0.0.1:8000/v1
+    modelsEndpoint: /models
+    allowUnauthenticated: true
     enabled: false
   mock:
     type: mock
@@ -40,17 +88,84 @@ providers:
     modelsEndpoint: /models
     enabled: false
 agents:
-  default:
+  tesla:
     model: mock
     tools:
+      - question
       - list_files
       - read_file
+      - find_files
+      - ripgrep
+      - write_file
+      - edit_file
+      - delete_path
+      - shell
+      - web_search
+      - mcp_list_tools
+      - mcp_call
+      - mcp__context7__*
+      - mcp__grep_app__*
+      - mcp__graphify__*
+      - mcp__semble__*
+      - mcp__playwright__*
+      - mcp__chrome_devtools__*
+      - mcp__github__*
+      - mcp__exa__*
+      - mcp__tinyfish__*
+      - mcp__headroom__*
 models:
   mock:
     provider: mock
     model: mock
     enabled: true
+    # Optional immutable telemetry metadata. Estimates are emitted only when
+    # the provider supplies a complete unambiguous input/output token split.
+    # contextWindowTokens: 128000
+    # pricing:
+    #   version: provider-price-sheet-2026-07
+    #   currency: USD
+    #   inputPerMillion: 1.25
+    #   outputPerMillion: 10
+# Optional hidden preflight. Setup writes this block only after discovering an
+# eligible configured model. Replace every model value with any key from models.
+# It covers the first meaningful prompt only and preserves the exact prompt for
+# the primary. The host caps depth-one children at 25 total/concurrent and
+# enforces 90s overall, 30s child, and a 5s finalizer reserve. Hidden roles get
+# only read/search/read-only-web tools and visibly fail open; cancellation stops
+# descendants. Usage telemetry is provider-reported when available; configured
+# pricing can supply a labeled estimate for complete unambiguous token splits.
+# preflight:
+#   enabled: true
+#   summary:
+#     model: your-configured-model-key
+#     tools: [list_files, read_file, find_files, ripgrep, web_search]
+#   analysis:
+#     model: your-configured-model-key
+#     tools: [list_files, read_file, find_files, ripgrep, web_search]
+#   explorer:
+#     model: your-configured-model-key
+#     tools: [list_files, read_file, find_files, ripgrep, web_search]
 permissions:
   tools:
+    question: allow
     list_files: allow
     read_file: allow
+    find_files: allow
+    ripgrep: allow
+    write_file: allow
+    edit_file: allow
+    delete_path: allow
+    shell: allow
+    web_search: allow
+    mcp_list_tools: allow
+    mcp_call: allow
+    mcp__context7__*: allow
+    mcp__grep_app__*: allow
+    mcp__graphify__*: allow
+    mcp__semble__*: allow
+    mcp__playwright__*: allow
+    mcp__chrome_devtools__*: allow
+    mcp__github__*: allow
+    mcp__exa__*: allow
+    mcp__tinyfish__*: allow
+    mcp__headroom__*: allow

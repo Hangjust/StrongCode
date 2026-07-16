@@ -1,7 +1,8 @@
 import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { StrongCodeError, toStrongCodeError } from "../core/errors";
+import { resolveStrongCodeHome } from "../config/paths";
 
 export interface ApiProviderAuth {
   type: "api";
@@ -23,11 +24,75 @@ export interface UnsupportedProviderAuth {
   reason: string;
 }
 
-export type ProviderAuth = ApiProviderAuth | OAuthProviderAuth | UnsupportedProviderAuth;
+export interface DelegatedProviderAuth {
+  type: "delegated";
+  provider: "codex" | "gcloud";
+  metadata?: Record<string, string>;
+}
+
+export type ProviderAuth = ApiProviderAuth | OAuthProviderAuth | DelegatedProviderAuth | UnsupportedProviderAuth;
 
 export interface ProviderAuthReader {
   get(providerId: string): Promise<ProviderAuth | undefined>;
   all(): Promise<Record<string, ProviderAuth>>;
+}
+
+export interface ProviderAuthStoreOptions {
+  /** Permit the process-wide STRONGCODE_AUTH_CONTENT override for this store. */
+  allowEnvironmentContent?: boolean;
+}
+
+export interface RuntimeAuthReaderOptions {
+  /** Explicit compatibility escape hatch; repository runtimes never enable this implicitly. */
+  allowGlobalFallback?: boolean;
+  /** Permit process-injected auth content only for a trusted runtime. */
+  allowEnvironmentContent?: boolean;
+}
+
+export class LayeredProviderAuthReader implements ProviderAuthReader {
+  constructor(private readonly primary: ProviderAuthReader, private readonly fallback: ProviderAuthReader) {}
+
+  async all(): Promise<Record<string, ProviderAuth>> {
+    return { ...await this.fallback.all(), ...await this.primary.all() };
+  }
+
+  async get(providerId: string): Promise<ProviderAuth | undefined> {
+    return await this.primary.get(providerId) ?? await this.fallback.get(providerId);
+  }
+}
+
+function samePath(left: string, right: string): boolean {
+  const leftPath = path.resolve(left);
+  const rightPath = path.resolve(right);
+  return process.platform === "win32" ? leftPath.toLowerCase() === rightPath.toLowerCase() : leftPath === rightPath;
+}
+
+/**
+ * Keep repository-scoped credentials outside the repository so a tracked file
+ * can never be overwritten with a real key. Each config path gets an isolated
+ * vault; the canonical home config continues to use its normal data directory.
+ */
+export function resolveRuntimeAuthDataDir(
+  configPath: string,
+  runtimeDataDir: string,
+  homePath = resolveStrongCodeHome()
+): string {
+  const resolvedHome = path.resolve(homePath);
+  const homeConfigPath = path.join(resolvedHome, "strongcode.config.yaml");
+  if (samePath(configPath, homeConfigPath)) return path.resolve(runtimeDataDir);
+  const resolvedConfigPath = path.resolve(configPath);
+  const identitySource = process.platform === "win32" ? resolvedConfigPath.toLowerCase() : resolvedConfigPath;
+  const identity = createHash("sha256").update(identitySource).digest("hex").slice(0, 24);
+  return path.join(resolvedHome, "project-auth", identity);
+}
+
+/** Build a runtime credential reader without implicitly crossing the project/home trust boundary. */
+export function createRuntimeAuthReader(dataDir: string, homePath = resolveStrongCodeHome(), options: RuntimeAuthReaderOptions = {}): ProviderAuthReader {
+  const storeOptions = { allowEnvironmentContent: options.allowEnvironmentContent === true };
+  const primary = new ProviderAuthStore(dataDir, storeOptions);
+  return samePath(dataDir, homePath) || options.allowGlobalFallback !== true
+    ? primary
+    : new LayeredProviderAuthReader(primary, new ProviderAuthStore(homePath, storeOptions));
 }
 
 function assertProviderId(providerId: string): void {
@@ -61,6 +126,9 @@ function parseProviderAuth(value: unknown): ProviderAuth | undefined {
   if (record.type === "unsupported" && typeof record.reason === "string" && record.reason.length > 0) {
     return { type: "unsupported", reason: record.reason };
   }
+  if (record.type === "delegated" && (record.provider === "codex" || record.provider === "gcloud")) {
+    return { type: "delegated", provider: record.provider, metadata };
+  }
 
   return undefined;
 }
@@ -77,16 +145,19 @@ function parseAuthFile(value: unknown): Record<string, ProviderAuth> {
 }
 
 export class ProviderAuthStore implements ProviderAuthReader {
+  private static readonly writeQueues = new Map<string, Promise<void>>();
   private readonly dataDir: string;
+  private readonly allowEnvironmentContent: boolean;
   readonly filePath: string;
 
-  constructor(dataDir: string) {
+  constructor(dataDir: string, options: ProviderAuthStoreOptions = {}) {
     this.dataDir = path.resolve(dataDir);
+    this.allowEnvironmentContent = options.allowEnvironmentContent !== false;
     this.filePath = path.join(this.dataDir, "auth.json");
   }
 
   async all(): Promise<Record<string, ProviderAuth>> {
-    if (process.env.STRONGCODE_AUTH_CONTENT) {
+    if (this.allowEnvironmentContent && process.env.STRONGCODE_AUTH_CONTENT) {
       try {
         return parseAuthFile(JSON.parse(process.env.STRONGCODE_AUTH_CONTENT));
       } catch (error) {
@@ -95,6 +166,7 @@ export class ProviderAuthStore implements ProviderAuthReader {
     }
 
     try {
+      if (!await this.assertCredentialDirectoryForRead()) return {};
       await this.assertNotSymlink(this.filePath);
       return parseAuthFile(JSON.parse(await readFile(this.filePath, "utf8")));
     } catch (error) {
@@ -112,19 +184,41 @@ export class ProviderAuthStore implements ProviderAuthReader {
     assertProviderId(providerId);
     const parsedAuth = parseProviderAuth(auth);
     if (!parsedAuth) throw new StrongCodeError("CONFIG_ERROR", "Invalid provider auth payload");
-    const next = { ...await this.all(), [providerId]: parsedAuth };
-    await this.writeAll(next);
+    await this.enqueueWrite(async () => {
+      const next = { ...await this.all(), [providerId]: parsedAuth };
+      await this.writeAll(next);
+    });
   }
 
   async remove(providerId: string): Promise<void> {
     assertProviderId(providerId);
-    const next = { ...await this.all() };
-    delete next[providerId];
-    await this.writeAll(next);
+    await this.enqueueWrite(async () => {
+      const next = { ...await this.all() };
+      delete next[providerId];
+      await this.writeAll(next);
+    });
+  }
+
+  private async enqueueWrite(operation: () => Promise<void>): Promise<void> {
+    if (this.allowEnvironmentContent && process.env.STRONGCODE_AUTH_CONTENT) {
+      throw new StrongCodeError("CONFIG_ERROR", "Credential writes are disabled while STRONGCODE_AUTH_CONTENT overrides the auth store");
+    }
+    const previous = ProviderAuthStore.writeQueues.get(this.filePath) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(operation);
+    ProviderAuthStore.writeQueues.set(this.filePath, current);
+    try {
+      await current;
+    } finally {
+      if (ProviderAuthStore.writeQueues.get(this.filePath) === current) ProviderAuthStore.writeQueues.delete(this.filePath);
+    }
   }
 
   private async writeAll(auth: Record<string, ProviderAuth>): Promise<void> {
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
+    const directoryStats = await lstat(this.dataDir);
+    if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) {
+      throw new StrongCodeError("CONFIG_ERROR", `Refusing to use non-directory credential store: ${this.dataDir}`);
+    }
     await chmod(this.dataDir, 0o700).catch(() => undefined);
     await this.assertNotSymlink(this.filePath);
     if (Object.keys(auth).length === 0) {
@@ -147,6 +241,20 @@ export class ProviderAuthStore implements ProviderAuthReader {
     } catch (error) {
       if (error instanceof StrongCodeError) throw error;
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
+      throw toStrongCodeError(error, "CONFIG_ERROR");
+    }
+  }
+
+  private async assertCredentialDirectoryForRead(): Promise<boolean> {
+    try {
+      const stats = await lstat(this.dataDir);
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw new StrongCodeError("CONFIG_ERROR", `Refusing to use non-directory credential store: ${this.dataDir}`);
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof StrongCodeError) throw error;
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
       throw toStrongCodeError(error, "CONFIG_ERROR");
     }
   }

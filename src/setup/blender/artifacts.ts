@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { ArtifactProvenance, WheelLock } from "./artifact-manifest";
 import { nodeArtifactFileSystem, nodeArtifactHttpClient } from "./artifact-io";
+import type { OfficialArtifactCatalog, OfficialWheelLock } from "./official-artifact-manifest";
 
 export { nodeArtifactFileSystem, nodeArtifactHttpClient } from "./artifact-io";
 
-const ALLOWED_HOSTS = new Set(["files.pythonhosted.org", "raw.githubusercontent.com"]);
+const ALLOWED_HOSTS = new Set(["files.pythonhosted.org", "projects.blender.org", "raw.githubusercontent.com"]);
 const DEFAULT_LIMITS = { overallMs: 60_000, idleMs: 10_000, maxArtifactBytes: 32 * 1024 * 1024 } as const;
 
 export type ArtifactDownloadLimits = {
@@ -71,6 +72,13 @@ export function lockedArtifactClosure(lock: WheelLock, provenance: ArtifactProve
     size: item.size,
     sha256: item.sha256
   }));
+}
+
+export function officialArtifactClosure(
+  catalog: OfficialArtifactCatalog,
+  lock: OfficialWheelLock
+): readonly LockedArtifact[] {
+  return [...catalog.release.assets, ...lock.dependencies];
 }
 
 export async function downloadVerifiedArtifacts(options: {

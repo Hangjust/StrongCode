@@ -1,5 +1,9 @@
 import { AgentRunner } from "../src/agents/runner";
+import type { Agent } from "../src/agents/agent";
 import { ProviderAuthStore } from "../src/models/auth-store";
+import type { ProviderAuthReader } from "../src/models/auth-store";
+import { GoogleGeminiModelProvider } from "../src/models/google-provider";
+import type { NativeProviderFetcher } from "../src/models/native-provider-utils";
 import type { OpenAICompatibleFetcher } from "../src/models/openai-compatible-provider";
 import { createAgent } from "../src/runtime/factory";
 import { SessionStore } from "../src/sessions/session-store";
@@ -122,6 +126,60 @@ describe("runner provider errors", () => {
     } finally {
       if (originalApiKey === undefined) delete process.env.STRONGCODE_TEST_API_KEY;
       else process.env.STRONGCODE_TEST_API_KEY = originalApiKey;
+    }
+  });
+
+  it("returns a redacted Google provider HTTP failure to the runner caller", async () => {
+    // Given
+    const workspace = await tempWorkspace();
+    const authStore: ProviderAuthReader = {
+      async get() {
+        return { type: "api", key: "google-test-key" };
+      },
+      async all() {
+        return {};
+      }
+    };
+    const fetcher: NativeProviderFetcher = async () => ({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+      async text() {
+        return JSON.stringify({ error: { message: "Authorization Bearer google-test-key is invalid" } });
+      }
+    });
+    const agent: Agent = {
+      name: "default",
+      config: { ...workspace.config.agents.default, tools: [] },
+      model: new GoogleGeminiModelProvider({
+        providerId: "google",
+        providerConfig: {
+          type: "google",
+          displayName: "Google Gemini",
+          apiKeyEnv: "GOOGLE_TEST_API_KEY",
+          baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+          modelsEndpoint: "/models",
+          enabled: true
+        },
+        modelId: "gemini-test",
+        modelConfig: { provider: "google", model: "gemini-test", enabled: true },
+        authStore,
+        fetcher
+      })
+    };
+    const runner = new AgentRunner(workspace.context, new SessionStore(workspace.context.dataDir), createDefaultToolRegistry());
+
+    // When
+    const result = await runner.run(agent, "hello", "google-http-error");
+
+    // Then
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        code: "MODEL_ERROR",
+        message: "Provider google completion failed with HTTP 429: Authorization Bearer [redacted] is invalid"
+      });
+      expect(result.error.message).not.toContain("google-test-key");
     }
   });
 });

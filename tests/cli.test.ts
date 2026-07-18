@@ -47,7 +47,7 @@ describe("cli", () => {
     const homePath = await mkdtemp(path.join(tmpdir(), "strongcode-cli-blender-"));
     const prompter = new BlenderPrompter();
     await saveSetupState(homePath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       completed: true,
       selectedProviders: [],
       deepSeekConfigured: false,
@@ -97,7 +97,7 @@ describe("cli", () => {
         install: async options => {
           installs += 1;
           repairs.push(options.repair ?? false);
-          return { status: "installed", profileId: options.profile.profileId, receiptPath: path.join(homePath, "mcps", "blender", "installation.json") };
+          return { status: "installed", profileId: options.selection.profile.profileId, receiptPath: path.join(homePath, "mcps", "blender", "installation.json") };
         }
       }
     });
@@ -110,7 +110,7 @@ describe("cli", () => {
   it("restores missing setup metadata after explicit healthy receipt verification without prompting", async () => {
     const homePath = await mkdtemp(path.join(tmpdir(), "strongcode-cli-blender-restore-"));
     await saveSetupState(homePath, {
-      schemaVersion: 2,
+      schemaVersion: 3,
       completed: true,
       selectedProviders: [],
       deepSeekConfigured: false,
@@ -158,7 +158,7 @@ describe("cli", () => {
         }),
         install: async options => {
           repairs.push(options.repair ?? false);
-          return { status: "already-installed", profileId: options.profile.profileId, receiptPath };
+          return { status: "already-installed", profileId: options.selection.profile.profileId, receiptPath };
         }
       }
     });
@@ -167,7 +167,7 @@ describe("cli", () => {
     expect(repairs).toEqual([false]);
     expect(prompter.notes.join("\n")).toContain("StrongCode Blender integration is already installed, enabled, and verification passed.");
     expect(await loadSetupState(homePath)).toMatchObject({
-      blenderOfferVersion: 1,
+      blenderOfferVersion: 2,
       blender: {
         profileId: profile.profileId,
         receiptPath,
@@ -189,7 +189,7 @@ describe("cli", () => {
         },
         install: async options => {
           installs += 1;
-          return { status: "installed", profileId: options.profile.profileId, receiptPath: "unused" };
+          return { status: "installed", profileId: options.selection.profile.profileId, receiptPath: "unused" };
         }
       }
     })).rejects.toThrow("requires an interactive TTY");

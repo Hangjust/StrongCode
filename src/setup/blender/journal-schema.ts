@@ -97,6 +97,10 @@ export const blenderInstallTargetSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["preState"],
       message: "pre-state must equal the required pre-state" });
   }
+  if (target.expectedPost.kind === "absent" && target.requiredPreState.kind === "absent") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["requiredPreState"],
+      message: "removal targets require a present required pre-state" });
+  }
   if (target.preState === null || target.preState.kind === "absent") {
     if (target.backup !== null) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["backup"],

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assertNoSymlinkPathComponents, atomicReplaceExpectedSource, sha256Source } from "../config/save";
 import { StrongCodeError } from "../core/errors";
+import { BLENDER_INTEGRATION_FLAVORS } from "./blender/selection";
 import { SETUP_SCHEMA_VERSION, type SetupState } from "./types";
 import { acquireSetupStateLock } from "./state-lock";
 
@@ -19,15 +20,25 @@ const setupCoreStateSchema = z.object({
   voiceToText: z.enum(["yes", "no", "maybe"]).default("no")
 });
 
-const installedBlenderIntegrationSchema = z.object({
+const installedBlenderIntegrationShape = {
   profileId: z.string().min(1),
   version: z.string().min(1),
   executablePath: z.string().min(1).refine(value => path.isAbsolute(value), "Blender executable path must be absolute"),
   receiptPath: z.string().min(1).refine(value => path.isAbsolute(value), "Blender receipt path must be absolute"),
   installedAt: z.string().datetime()
+};
+const legacyInstalledBlenderIntegrationSchema = z.object(installedBlenderIntegrationShape).strict().readonly();
+const installedBlenderIntegrationSchema = z.object({
+  flavor: z.enum(BLENDER_INTEGRATION_FLAVORS),
+  ...installedBlenderIntegrationShape
 }).strict().readonly();
 
 const setupStateV1Schema = setupCoreStateSchema.extend({ schemaVersion: z.literal(1) });
+const setupStateV2Schema = setupCoreStateSchema.extend({
+  schemaVersion: z.literal(2),
+  blender: legacyInstalledBlenderIntegrationSchema.optional(),
+  blenderOfferVersion: z.number().int().nonnegative().default(0)
+});
 const setupStateSchema = setupCoreStateSchema.extend({
   schemaVersion: z.literal(SETUP_SCHEMA_VERSION),
   blender: installedBlenderIntegrationSchema.optional(),
@@ -128,6 +139,15 @@ export async function saveSetupState(homePath: string, state: SetupState): Promi
 function parseSetupState(value: unknown): SetupState {
   const current = setupStateSchema.safeParse(value);
   if (current.success) return current.data;
+  const previous = setupStateV2Schema.safeParse(value);
+  if (previous.success) {
+    const { blender, ...core } = previous.data;
+    return {
+      ...core,
+      schemaVersion: SETUP_SCHEMA_VERSION,
+      ...(blender ? { blender: { ...blender, flavor: "legacy" } } : {})
+    };
+  }
   const legacy = setupStateV1Schema.safeParse(value);
   if (legacy.success) return { ...legacy.data, schemaVersion: SETUP_SCHEMA_VERSION, blenderOfferVersion: 0 };
   throw new StrongCodeError("CONFIG_ERROR", `Invalid setup.json: ${current.error.issues.map(issue => issue.message).join("; ")}`);

@@ -18,7 +18,7 @@ class ProvenanceTests(unittest.TestCase):
         expected_paths = sorted(
             path.relative_to(ASSET_ROOT).as_posix()
             for path in ASSET_ROOT.rglob("*.py")
-            if "__pycache__" not in path.parts
+            if "__pycache__" not in path.parts and "official-derivative" not in path.parts
         )
 
         # When
@@ -30,6 +30,20 @@ class ProvenanceTests(unittest.TestCase):
             content = (ASSET_ROOT / derivative["path"]).read_bytes()
             self.assertEqual(derivative["sha256"], hashlib.sha256(content).hexdigest())
             self.assertEqual(derivative["licensePath"], "LICENSE")
+
+    def test_official_manifest_hashes_authenticated_derivative_python_assets(self) -> None:
+        # Given
+        root = ASSET_ROOT / "official-derivative"
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        expected = {
+            "connection.py": manifest["assets"]["connectionSha256"],
+            "strongcode_auth.py": manifest["assets"]["authenticationSha256"],
+        }
+
+        # When / Then
+        self.assertEqual(sorted(path.name for path in root.glob("*.py")), sorted(expected))
+        for filename, digest in expected.items():
+            self.assertEqual(hashlib.sha256((root / filename).read_bytes()).hexdigest(), digest)
 
     def test_runtime_wrapper_directory_contains_only_runtime_assets(self) -> None:
         # Given / When

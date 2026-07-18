@@ -57,6 +57,11 @@ export const slashCommandRegistry = [
     help: [{ section: "session", text: "  /compact           Compact active context", order: 8 }]
   },
   {
+    canonical: "computer-use",
+    triggers: [{ id: "computer-use", title: "Computer Use", description: "Enable computer use for one turn", slash: "/computer use" }],
+    help: [{ section: "session", text: "  /computer use [task] Enable computer use for one turn", order: 9 }]
+  },
+  {
     canonical: "model",
     triggers: [
       { id: "model", title: "Model", description: "Choose a model for the active agent", slash: "/model", fullTuiRoute: "models", modelAction: "open" },
@@ -72,7 +77,7 @@ export const slashCommandRegistry = [
   {
     canonical: "summary",
     triggers: [{ id: "summary", title: "Summary", description: "Open session telemetry and the latest turn", slash: "/summary", fullTuiRoute: "summary" }],
-    help: [{ section: "session", text: "  /summary / F2     Tokens · cost · tools · MCPs", order: 9 }]
+    help: [{ section: "session", text: "  /summary / F2     Tokens · cost · tools · MCPs", order: 10 }]
   },
   {
     canonical: "help",
@@ -83,7 +88,7 @@ export const slashCommandRegistry = [
     canonical: "exit",
     triggers: [{ id: "exit", title: "Exit", description: "Close StrongCode", slash: "/exit" }],
     plainAliases: ["exit", "quit"],
-    help: [{ section: "session", text: "  /exit              Exit StrongCode", order: 10 }]
+    help: [{ section: "session", text: "  /exit              Exit StrongCode", order: 11 }]
   }
 ] as const satisfies readonly SlashCommandDefinitionShape[];
 
@@ -109,6 +114,7 @@ export type ParsedSlashCommand =
   | { readonly command: "agent"; readonly action: "select"; readonly target: string }
   | { readonly command: "start-work" }
   | { readonly command: "compact" }
+  | { readonly command: "computer-use" }
   | { readonly command: "model"; readonly action: "open" }
   | { readonly command: "model"; readonly action: "list" }
   | { readonly command: "model"; readonly action: "select"; readonly modelId: string; readonly agentId?: string }
@@ -147,7 +153,10 @@ function tokenizeCommandInput(input: string): CommandInput | undefined {
 export function parseSlashCommand(input: string): ParsedSlashCommand | undefined {
   const parsedInput = tokenizeCommandInput(input);
   if (!parsedInput) return undefined;
-  const slashMatch = slashCommandMatches.find(match => match.trigger.slash === parsedInput.normalizedToken);
+  const normalizedInput = parsedInput.trimmed.toLowerCase();
+  const slashMatch = slashCommandMatches.find(match => (
+    normalizedInput === match.trigger.slash || normalizedInput.startsWith(`${match.trigger.slash} `)
+  ));
   const definition = slashMatch?.definition ?? slashCommandRegistry.find(command =>
     "plainAliases" in command && command.plainAliases.some(alias => alias === parsedInput.normalizedToken)
   );
@@ -171,6 +180,8 @@ export function parseSlashCommand(input: string): ParsedSlashCommand | undefined
       return parsedInput.rawArgs === undefined
         ? { command: definition.canonical }
         : { command: "unknown", input: parsedInput.trimmed };
+    case "computer-use":
+      return { command: "computer-use" };
     case "model": {
       if (slashMatch && "modelAction" in slashMatch.trigger && slashMatch.trigger.modelAction === "list") {
         return parsedInput.rawArgs === undefined
@@ -207,6 +218,7 @@ export function slashCommandAllowedDuringTurn(command: ParsedSlashCommand): bool
       return command.action === "open" || command.action === "list";
     case "start-work":
     case "compact":
+    case "computer-use":
       return false;
     default:
       return assertNever(command);

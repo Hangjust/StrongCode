@@ -95,7 +95,7 @@ describe("first-run setup", () => {
 
     const state = await loadSetupState(homePath);
 
-    expect(state).toMatchObject({ schemaVersion: 2, completed: true, mockOnlyConfirmed: true, blenderOfferVersion: 0 });
+    expect(state).toMatchObject({ schemaVersion: 3, completed: true, mockOnlyConfirmed: true, blenderOfferVersion: 0 });
     expect(state.blender).toBeUndefined();
     expect(JSON.parse(await readFile(path.join(homePath, "setup.json"), "utf8")).schemaVersion).toBe(1);
   });
@@ -129,21 +129,21 @@ describe("first-run setup", () => {
         discover: async () => blenderDiscovery(),
         install: async options => {
           installs.push(options);
-          return { status: "installed", profileId: options.profile.profileId, receiptPath: path.join(homePath, "mcps", "blender", "installation.json") };
+          return { status: "installed", profileId: options.selection.profile.profileId, receiptPath: path.join(homePath, "mcps", "blender", "installation.json") };
         }
       }
     });
 
     expect(installs).toHaveLength(1);
-    expect(installs[0]).toMatchObject({ profile: blenderProfile, python: blenderPython, platform: "win32", architecture: "x64" });
+    expect(installs[0]).toMatchObject({ selection: { flavor: "legacy", profile: blenderProfile }, python: blenderPython, platform: "win32", architecture: "x64" });
     expect(prompts.confirmCalls.at(-1)?.initialValue).toBe(false);
     expect(prompts.output.join("\n")).toContain("blender-mcp 1.6.4");
     expect(prompts.output.join("\n")).toContain("execute_blender_code");
     expect(prompts.output.join("\n")).toContain("rollback");
     expect(result.state).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       completed: true,
-      blenderOfferVersion: 1,
+      blenderOfferVersion: 2,
       blender: {
         profileId: blenderProfile.profileId,
         version: blenderProfile.version,
@@ -171,7 +171,7 @@ describe("first-run setup", () => {
         discover: async () => blenderDiscovery(),
         install: async options => {
           installs += 1;
-          return { status: "installed", profileId: options.profile.profileId, receiptPath: "unused" };
+          return { status: "installed", profileId: options.selection.profile.profileId, receiptPath: "unused" };
         }
       }
     });
@@ -179,7 +179,7 @@ describe("first-run setup", () => {
     expect(installs).toBe(0);
     expect(result.state.completed).toBe(true);
     expect(result.state.blender).toBeUndefined();
-    expect(result.state.blenderOfferVersion).toBe(1);
+    expect(result.state.blenderOfferVersion).toBe(2);
   });
 
   it("reports the exact Python prerequisite without prompting or mutating Blender", async () => {
@@ -200,7 +200,7 @@ describe("first-run setup", () => {
         discover: async () => blenderDiscovery({ python: undefined }),
         install: async options => {
           installs += 1;
-          return { status: "installed", profileId: options.profile.profileId, receiptPath: "unused" };
+          return { status: "installed", profileId: options.selection.profile.profileId, receiptPath: "unused" };
         }
       }
     });
@@ -249,6 +249,7 @@ describe("first-run setup", () => {
         await updateSetupState(homePath, () => ({
           blenderOfferVersion: 1,
           blender: {
+            flavor: "legacy",
             profileId: blenderProfile.profileId,
             version: blenderProfile.version,
             executablePath: blenderProfile.executable.canonicalPath,

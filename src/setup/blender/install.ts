@@ -1,9 +1,4 @@
 import path from "node:path";
-import type { ArtifactProvenance, WheelLock } from "./artifact-manifest";
-import type { VerifiedArtifactDownloader } from "./artifacts";
-import {
-  probeInstalledBlenderAddon
-} from "./blender-preferences";
 import {
   BLENDER_MANAGED_MARKER,
   planGlobalBlenderConfigMerge,
@@ -23,11 +18,7 @@ import {
   stageBlenderIntegration,
   type ManagedBlenderPaths
 } from "./install-plan";
-import {
-  assertInstallationReceiptOwnership,
-  installationReceiptMatches,
-  readInstallationReceipt
-} from "./installation-receipt";
+import { readInstallationReceipt } from "./installation-receipt";
 import {
   ACTIVATION_PHASES,
   activateBlenderInstallTarget,
@@ -41,37 +32,32 @@ import {
   acquireBlenderInstallLock,
   type ActivationPhase
 } from "./journal";
+import { probeOfficialBlenderMcp, type OfficialMcpProbeAdapter } from "./official-mcp-probe";
+import { installOfficialBlenderIntegration } from "./official-install";
 import {
-  type EnvironmentFileSystem,
-  type EnvironmentProcessAdapter
-} from "./python-env";
+  enableOfficialBlenderExtension,
+  probeOfficialBlenderExtension,
+  stageOfficialBlenderAddon
+} from "./official-addon";
+import { stageOfficialBlenderRuntime } from "./official-runtime";
+import { legacyInstallationHealthy } from "./legacy-install-state";
+import { createBlenderMigrationRemovalPlans, inspectBlenderMigrationPredecessor,
+  migrationPredecessorProfile, type BlenderMigrationPredecessor } from "./migration";
 import { nodeProbeProcessAdapter } from "./probe";
-import type { BlenderProfileCandidate, CpythonCandidate, ProbeProcessAdapter } from "./types";
 import { BLENDER_INTEGRATION_LOCK_ID, verifyBlenderIntegration } from "./verification";
+import type {
+  InstallBlenderIntegrationOptions,
+  LegacyInstallBlenderIntegrationOptions,
+  OfficialInstallBlenderIntegrationOptions
+} from "./install-options";
+
+export type {
+  InstallBlenderIntegrationOptions,
+  LegacyInstallBlenderIntegrationOptions,
+  OfficialInstallBlenderIntegrationOptions
+} from "./install-options";
 
 export { BLENDER_INTEGRATION_LOCK_ID } from "./verification";
-
-export type InstallBlenderIntegrationOptions = {
-  readonly homePath: string;
-  readonly profile: BlenderProfileCandidate;
-  readonly python: CpythonCandidate;
-  readonly platform: NodeJS.Platform;
-  readonly architecture: string;
-  readonly lock: WheelLock;
-  readonly provenance: ArtifactProvenance;
-  readonly requirements: string;
-  readonly wrapperAssetsPath: string;
-  readonly addonAssetsPath: string;
-  readonly downloader?: VerifiedArtifactDownloader;
-  readonly environmentProcess?: EnvironmentProcessAdapter;
-  readonly environmentFiles?: EnvironmentFileSystem;
-  readonly blenderProcess?: ProbeProcessAdapter;
-  readonly files?: BlenderInstallerFileSystem;
-  readonly env?: NodeJS.ProcessEnv;
-  readonly repair?: boolean;
-  readonly verifyOnly?: boolean;
-  readonly phaseHook?: (phase: ActivationPhase) => void | Promise<void>;
-};
 
 export type InstallBlenderIntegrationResult = {
   readonly status: "installed" | "already-installed";
@@ -86,11 +72,21 @@ export async function installBlenderIntegration(
   if (verifyOnly && options.repair) {
     throw new BlenderInstallError("conflict", "Verification-only Blender setup cannot repair or install managed targets");
   }
-  requireSupportedSelection(options);
+  requirePlatformPrerequisite(options);
+  if (!isLegacyInstall(options)) {
+    switch (options.selection.flavor) {
+      case "official":
+        return installOfficialBlenderIntegration(options);
+      default:
+        return unsupportedSelection(options.selection.flavor);
+    }
+  }
+  requireLockedRuntime(options);
   if (verifyOnly) return verifyBlenderIntegration(options);
-  const legacyRecovery = options.profile.profileId === BLENDER_INTEGRATION_LOCK_ID
+  const profile = options.selection.profile;
+  const legacyRecovery = profile.profileId === BLENDER_INTEGRATION_LOCK_ID
     ? []
-    : await recoverBlenderInstallations({ homePath: options.homePath, profileId: options.profile.profileId });
+    : await recoverBlenderInstallations({ homePath: options.homePath, profileId: profile.profileId });
   if (legacyRecovery.some(receipt => receipt.status === "recovery_conflict")) {
     throw new BlenderInstallError("conflict", "An incomplete Blender installation has recovery conflicts");
   }
@@ -111,45 +107,62 @@ export async function installBlenderIntegration(
     if (recovery.some(receipt => receipt.status === "recovery_conflict")) {
       throw new BlenderInstallError("conflict", "An incomplete Blender installation has recovery conflicts");
     }
-    const merge = await planGlobalBlenderConfigMerge({ homePath: options.homePath, pythonPath: paths.python,
-      wrapperPath: paths.wrapper, privateConfigPath: paths.privateConfig });
-    const existingReceipt = await readInstallationReceipt({ receiptPath: paths.receipt, files });
-    let mode: "install" | "repair" = "install";
-    if (existingReceipt) {
-      if (existingReceipt.profileId !== options.profile.profileId) {
-        throw new BlenderInstallError("conflict", `Blender integration is owned by a different managed profile: ${existingReceipt.profileId}`);
+    const receipt = await readInstallationReceipt({ receiptPath: paths.receipt, files });
+    let predecessor: BlenderMigrationPredecessor | undefined;
+    if (receipt !== undefined && receipt.schemaVersion === 3 && receipt.flavor === "official") {
+      if (!options.repair) {
+        throw new BlenderInstallError("conflict", "Blender integration flavor migration required; rerun strongcode setup --blender --force");
       }
-      const immutableTargetPaths = [paths.privateConfig, paths.addon, paths.runtime];
-      const legacyTargetPaths = [paths.privateConfig, paths.addon, paths.preferences, merge.permissions.filePath,
-        merge.mcp.filePath, paths.runtime];
-      const ownership = { receipt: existingReceipt, profile: options.profile, immutableTargetPaths, legacyTargetPaths,
-        mcpPath: merge.mcp.filePath, permissionsPath: merge.permissions.filePath, preferencesPath: paths.preferences };
-      assertInstallationReceiptOwnership(ownership);
-      await files.verifyFile(options.profile.executable.canonicalPath, options.profile.executable.sha256);
-      const matches = await installationReceiptMatches({ ...ownership, provenance: options.provenance,
-        lock: options.lock, requirements: options.requirements, mcpFragmentSha256: merge.mcp.fragmentSha256,
-        permissionsFragmentSha256: merge.permissions.fragmentSha256, files });
-      const enabled = matches && !merge.mcp.changed && !merge.permissions.changed
-        ? await probeInstalledBlenderAddon({ profile: options.profile, privateProfilePath: path.dirname(paths.privateConfig),
-          process: blenderProcess, ...(options.env ? { env: options.env } : {}) })
-        : false;
-      if (matches && !merge.mcp.changed && !merge.permissions.changed && enabled) {
-        return { status: "already-installed", profileId: options.profile.profileId, receiptPath: paths.receipt };
+      predecessor = await inspectBlenderMigrationPredecessor({ homePath: options.homePath, receiptPath: paths.receipt,
+        receipt, successorFlavor: "legacy", files });
+      if (predecessor.launch.flavor !== "official") {
+        throw new BlenderInstallError("conflict", "Official Blender predecessor launch evidence is invalid");
+      }
+      const predecessorProfile = migrationPredecessorProfile(receipt);
+      const enabled = await (options.extensionProbe ?? probeOfficialBlenderExtension)({
+        profile: predecessorProfile,
+        privateConfigPath: predecessor.launch.privateConfigPath,
+        process: blenderProcess,
+        env: options.env
+      });
+      if (!enabled || (await probeOfficialBlenderMcp({ pythonPath: predecessor.launch.pythonPath,
+          launcherPath: predecessor.launch.launcherPath, cwd: path.dirname(predecessor.launch.launcherPath),
+          privateConfigPath: predecessor.launch.privateConfigPath,
+          adapter: options.mcpProbe, env: options.env })).length === 0) {
+        throw new BlenderInstallError("conflict", "Official Blender predecessor requires repair before migration");
+      }
+    } else if (receipt !== undefined && receipt.schemaVersion === 3 && receipt.flavor !== "legacy") {
+      throw new BlenderInstallError("conflict", "Unsupported Blender migration receipt flavor");
+    }
+    const merge = await planGlobalBlenderConfigMerge({ homePath: options.homePath,
+      launch: { flavor: "legacy", pythonPath: paths.python, wrapperPath: paths.wrapper,
+        privateConfigPath: paths.privateConfig }, transition: predecessor?.transition });
+    let mode: "install" | "repair" | "migration" = predecessor === undefined ? "install" : "migration";
+    if (receipt !== undefined && predecessor === undefined) {
+      if (receipt.profileId !== profile.profileId) {
+        throw new BlenderInstallError("conflict", `Blender integration is owned by a different managed profile: ${receipt.profileId}`);
+      }
+      await files.verifyFile(profile.executable.canonicalPath, profile.executable.sha256);
+      if (await legacyInstallationHealthy({ install: options, paths, merge, receipt, files, blenderProcess })) {
+        return { status: "already-installed", profileId: profile.profileId, receiptPath: paths.receipt };
       }
       if (!options.repair) {
         throw new BlenderInstallError("conflict", "Blender integration repair required; rerun strongcode setup --blender --force");
       }
       mode = "repair";
-    } else {
+    } else if (receipt === undefined) {
       await rejectUnownedIntegration(paths, merge, files);
     }
     await verifyDerivativeAddonAssets({ addonAssetsPath: options.addonAssetsPath, provenance: options.provenance, files });
     await verifyDerivativeWrapperAssets({ wrapperAssetsPath: options.wrapperAssetsPath, provenance: options.provenance, files });
-    await files.verifyFile(options.profile.executable.canonicalPath, options.profile.executable.sha256);
+    await files.verifyFile(profile.executable.canonicalPath, profile.executable.sha256);
     const preStates = await captureManagedBlenderPreStates({ paths, merge, files, mode });
     temporaryRoot = await files.createTemporaryDirectory(options.homePath);
     const staged = await stageBlenderIntegration({ install: options, paths, temporaryRoot, files, blenderProcess, preStates });
-    const plans = await createBlenderTargetPlans({ install: options, paths, merge, staged, files, preStates });
+    const removalPlans = predecessor === undefined ? [] : createBlenderMigrationRemovalPlans({ predecessor,
+      successorImmutablePaths: [paths.privateConfig, paths.addon, paths.runtime] });
+    const plans = await createBlenderTargetPlans({ install: options, paths, merge, staged, files, preStates,
+      predecessor: predecessor?.predecessor, removalPlans });
     createdParents = await files.ensureParentDirectories(plans.map(plan => plan.canonicalPath));
     await files.verifyFile(merge.permissions.filePath, merge.permissions.expectedSourceHash);
     await files.verifyFile(merge.mcp.filePath, merge.mcp.expectedSourceHash);
@@ -173,7 +186,7 @@ export async function installBlenderIntegration(
     }
     await commitBlenderInstall(journalPath);
     lockOwner = "released";
-    return { status: "installed", profileId: options.profile.profileId, receiptPath: paths.receipt };
+    return { status: "installed", profileId: profile.profileId, receiptPath: paths.receipt };
   } catch (error) {
     if (journalPath) {
       const journal = await readBlenderInstallJournal(journalPath);
@@ -196,6 +209,10 @@ export async function installBlenderIntegration(
   }
 }
 
+function unsupportedSelection(selection: never): never {
+  throw new BlenderInstallError("conflict", `Unsupported Blender integration selection: ${JSON.stringify(selection)}`);
+}
+
 async function rejectUnownedIntegration(
   paths: ManagedBlenderPaths,
   merge: GlobalBlenderConfigMergePlan,
@@ -210,14 +227,21 @@ async function rejectUnownedIntegration(
   }
 }
 
-function requireSupportedSelection(options: InstallBlenderIntegrationOptions): void {
-  const version = /^(\d+)\.(\d+)(?:\.|$)/u.exec(options.profile.version);
-  const blenderSupported = version !== null && (Number(version[1]) > 4 || (Number(version[1]) === 4 && Number(version[2]) >= 2));
-  if (!blenderSupported) throw new BlenderInstallError("conflict", "StrongCode Blender integration requires Blender 4.2 or newer");
-  const target = options.lock.target;
+function isLegacyInstall(options: InstallBlenderIntegrationOptions): options is LegacyInstallBlenderIntegrationOptions {
+  return options.selection.flavor === "legacy";
+}
+
+function requirePlatformPrerequisite(options: InstallBlenderIntegrationOptions): void {
   if (options.platform !== "win32" || options.architecture !== "x64"
     || options.python.implementation !== "cpython" || options.python.version.major !== 3 || options.python.version.minor !== 11
-    || target.implementation !== "cp" || target.python !== "3.11" || target.abi !== "cp311" || target.platform !== "win_amd64") {
+    || options.python.pointerWidth !== 64 || options.python.sysconfigPlatform !== "win_amd64") {
+    throw new BlenderInstallError("conflict", "Blender integration requires the locked CPython 3.11 win_amd64 runtime");
+  }
+}
+
+function requireLockedRuntime(options: LegacyInstallBlenderIntegrationOptions): void {
+  const target = options.lock.target;
+  if (target.implementation !== "cp" || target.python !== "3.11" || target.abi !== "cp311" || target.platform !== "win_amd64") {
     throw new BlenderInstallError("conflict", "Blender integration requires the locked CPython 3.11 win_amd64 runtime");
   }
 }

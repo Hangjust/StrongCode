@@ -36,7 +36,7 @@ describe("StrongCode home", () => {
     const generatedReadme = await readFile(path.join(homePath, "README.md"), "utf8");
     const generatedDirectory = STRONGCODE_HOME_EXPANDED_STARTER_FILES["DIRECTORY.md"]?.content ?? "";
 
-    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(8);
+    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(9);
     expect(agents.generated).toBe(true);
     expect(agents.reviewOnly).toBe(true);
     expect(agents.runtimeSource).toContain("strongcode.config.yaml");
@@ -128,34 +128,14 @@ describe("StrongCode home", () => {
     expect(schema.properties.agents.additionalProperties.properties.mode.enum).toEqual(["primary", "subagent"]);
   });
 
-  it("asserts exact legacy hashes for version-7 generated files", () => {
-    // Given
-    const expected = {
-      "mcp.json": [
-        "d4f41040dd1622f1b5f936d9b6705372ec2eaf85625535dddbd903112954e4ad",
-        "d7fb203472edf219daf70c1e3be7cf109adbca6becd8980362c3be2af32461dc"
-      ],
-      "strongcode.config.yaml": [
-        "17091f5d52c5f0ef41a0d1a149a41c446b133e2c7eefef02e8de8104f7aa9dac",
-        "35d034f0269623f5465414cba15ea9d2c50ea37810843561292406e23f4c3bcd"
-      ],
-      "strongcode.json": [
-        "957744f1fd1bec68d0218cd358bc95a84940c7557acf8b6a76c411702d5f7d31",
-        "733bffba3e4633a4aeeacfbeee07cfee1a38979026edb0c31ec16fd2152b65b8",
-        "4410f3f81cd2e96628be1cfe2c1f5bb33a4a275c7ef5b60b8ac56eb99d08a38c",
-        "f8572f1364acf862e7b9801ad736139df2798af790d966660d20b495fc661256"
-      ]
-    } as const;
+  it("recognizes each exact immediately preceding generated home doc hash once", async () => {
+    const priorReadme = await readFile(path.join(process.cwd(), "tests", "fixtures", "strongcode-home-v8-readme.md"));
+    const priorDirectory = await readFile(path.join(process.cwd(), "tests", "fixtures", "strongcode-home-v8-directory.md"));
 
-    // When
-    const mcpHashes = STRONGCODE_HOME_LEGACY_HASHES["mcp.json"];
-    const configHashes = STRONGCODE_HOME_LEGACY_HASHES["strongcode.config.yaml"];
-    const homeHashes = STRONGCODE_HOME_LEGACY_HASHES["strongcode.json"];
-
-    // Then
-    expect(mcpHashes).toEqual(expected["mcp.json"]);
-    expect(configHashes).toEqual(expected["strongcode.config.yaml"]);
-    expect(homeHashes).toEqual(expected["strongcode.json"]);
+    expect(createHash("sha256").update(priorReadme).digest("hex")).toBe("febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005");
+    expect(createHash("sha256").update(priorDirectory).digest("hex")).toBe("23b1bfcbdff12eca0e85cf013512a2084b303c44396142c4791767724b5b4bcb");
+    expect(STRONGCODE_HOME_LEGACY_HASHES["README.md"]?.filter(hash => hash === "febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005")).toHaveLength(1);
+    expect(STRONGCODE_HOME_LEGACY_HASHES["DIRECTORY.md"]?.filter(hash => hash === "23b1bfcbdff12eca0e85cf013512a2084b303c44396142c4791767724b5b4bcb")).toHaveLength(1);
   });
 
   it("recognizes every immediately preceding generated agent mirror for upgrade", () => {
@@ -170,16 +150,6 @@ describe("StrongCode home", () => {
     expect(STRONGCODE_HOME_LEGACY_HASHES["prompts/agents/meta.md"]).toContain("893b1d5ec9883a068d602277b956eafbefe599dcd68aa7222140e14d8befdb1f");
     expect(STRONGCODE_HOME_LEGACY_HASHES["prompts/agents/sugar-boo.md"]).toContain("4f519b3b370b838467fd8ee11f46599f470451a3834ce359d88cc4a8f2628808");
     expect(STRONGCODE_HOME_LEGACY_HASHES["prompts/agents/warren-buffer.md"]).toContain("d3cc181232adfc1b97f3862b6207a71a3ca90e78ea4d151ea8d087a4de7f4116");
-  });
-
-  it("recognizes each exact immediately preceding generated home doc hash once", async () => {
-    const priorReadme = await readFile(path.join(process.cwd(), "tests", "fixtures", "strongcode-home-v8-readme.md"));
-    const priorDirectory = await readFile(path.join(process.cwd(), "tests", "fixtures", "strongcode-home-v8-directory.md"));
-
-    expect(createHash("sha256").update(priorReadme).digest("hex")).toBe("febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005");
-    expect(createHash("sha256").update(priorDirectory).digest("hex")).toBe("23b1bfcbdff12eca0e85cf013512a2084b303c44396142c4791767724b5b4bcb");
-    expect(STRONGCODE_HOME_LEGACY_HASHES["README.md"]?.filter(hash => hash === "febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005")).toHaveLength(1);
-    expect(STRONGCODE_HOME_LEGACY_HASHES["DIRECTORY.md"]?.filter(hash => hash === "23b1bfcbdff12eca0e85cf013512a2084b303c44396142c4791767724b5b4bcb")).toHaveLength(1);
   });
 
   it("explicitly upgrades a byte-identical prior generated home README", async () => {

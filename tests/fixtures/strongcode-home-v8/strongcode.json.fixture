@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "layoutVersion": 8,
+  "defaultAgent": "tesla",
+  "files": {
+    "runtimeConfig": "strongcode.config.yaml",
+    "setupState": "setup.json",
+    "agents": "agents.json",
+    "categories": "categories.json",
+    "providers": "providers.json",
+    "models": "models.json",
+    "permissions": "permissions.json",
+    "credentials": "auth.json",
+    "mcp": "mcp.json",
+    "discovery": "skills.mcps.json"
+  },
+  "directories": {
+    "agents": "agents",
+    "cache": "cache",
+    "credentials": "credentials",
+    "logs": "logs",
+    "mcpServers": "mcps",
+    "nodeModules": "node_modules",
+    "projectAuth": "project-auth",
+    "projects": "projects",
+    "prompts": "prompts",
+    "sessions": "sessions",
+    "skills": "skills",
+    "tui": "tui"
+  }
+}

@@ -28,7 +28,8 @@ const blenderPayloadSchema = z.object({
     user: absolutePathSchema
   }).strict(),
   configPath: absolutePathSchema,
-  scriptsPaths: z.array(absolutePathSchema).max(32)
+  scriptsPaths: z.array(absolutePathSchema).max(32),
+  extensionsPath: absolutePathSchema.nullable().optional()
 }).strict();
 const pythonPayloadSchema = z.object({
   implementation: z.literal("cpython"),
@@ -45,6 +46,7 @@ const BLENDER_EXPRESSION = [
   "'version':bpy.app.version_string,",
   "'resourcePaths':{k.lower():bpy.utils.resource_path(k) for k in ('LOCAL','SYSTEM','USER')},",
   "'configPath':bpy.utils.user_resource('CONFIG'),",
+  "'extensionsPath':bpy.utils.user_resource('EXTENSIONS'),",
   "'scriptsPaths':bpy.utils.script_paths()",
   "},separators=(',',':')))"
 ].join("");
@@ -197,7 +199,10 @@ export async function probeBlender(
     paths: {
       resources: parsed.data.resourcePaths,
       config: parsed.data.configPath,
-      scripts: parsed.data.scriptsPaths
+      scripts: parsed.data.scriptsPaths,
+      ...(parsed.data.extensionsPath === null || parsed.data.extensionsPath === undefined
+        ? {}
+        : { extensions: parsed.data.extensionsPath })
     },
     sources: candidate.sources
   };

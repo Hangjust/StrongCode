@@ -1,5 +1,5 @@
 import type { ModelConfig, ProviderConfig } from "../config/schema";
-import { StrongCodeError } from "../core/errors";
+import { PublicProviderError, StrongCodeError } from "../core/errors";
 import type { ConversationItem, ToolCall } from "../core/types";
 import type { ProviderAuthReader } from "./auth-store";
 import { resolveProviderCredentials } from "./credentials";
@@ -236,7 +236,7 @@ export class GoogleGeminiModelProvider implements ModelProvider {
     }
     if (!response.ok) {
       const detail = formatNativeProviderError(response, responseText, credentials.secret);
-      throw new StrongCodeError("MODEL_ERROR", `Provider ${this.options.providerId} completion failed with HTTP ${response.status}: ${detail}`);
+      throw new PublicProviderError(`Provider ${this.options.providerId} completion failed with HTTP ${response.status}: ${detail}`);
     }
     request.signal?.throwIfAborted();
     return parseGeminiResponse(responseText, "gemini-developer-api", response.headers?.get("x-request-id") ?? undefined);

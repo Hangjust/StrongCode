@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { StrongCodeError, toStrongCodeError } from "../core/errors";
+import { PublicProviderError, StrongCodeError, toStrongCodeError } from "../core/errors";
 import { err, ok, type Result } from "../core/result";
 import { validateConversationItems, type ConversationItem, type ToolExecution } from "../core/types";
 import type { ModelResponse, ModelToolDefinition } from "../models/provider";
@@ -112,13 +112,14 @@ export async function runModelToolLoop(input: RunnerLoopInput): Promise<Result<R
           ? {}
           : { untrustedPreflightAdvice: input.untrustedPreflightAdvice })
       });
-    } catch {
+    } catch (error) {
       if (input.context.signal?.aborted) {
         if (recorder !== undefined) await recorder.recordCancellation(producingAttemptId, "provider_cancelled");
         return err(cancelledError());
       }
       if (recorder !== undefined) await recorder.recordFailure(producingAttemptId, "provider_failed");
-      return err(new StrongCodeError("MODEL_ERROR", "Primary provider failed"));
+      const message = error instanceof PublicProviderError ? error.message : "Primary provider failed";
+      return err(new StrongCodeError("MODEL_ERROR", message));
     }
     if (recorder !== undefined) recording = Promise.resolve().then(() => recorder.recordResponse(response, producingAttemptId));
     if (input.context.signal?.aborted) return err(cancelledError());

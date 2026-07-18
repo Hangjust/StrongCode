@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://projects.blender.org/lab/blender_mcp",
+    "commit": "03004fd0216bfe5e0a3d9ac9b47d5efadc3d78c4",
+    "version": "1.0.0"
+  },
+  "upstreamSources": {
+    "runtimeConnectionSha256": "baf88240a8c5fc8dc30c8c01f6df3efc6eb52dcc47ed48031d7f1d58f7917cc2",
+    "addonServerSha256": "4080b91fb4f8b648209ba850acbfa143e8d2ede385f1d7db5c198e483304e50a",
+    "addonInitSha256": "42c618aa4cab373529524fd58c6f26b8c84d56ffef17b2db1edc2df3be914c8d"
+  },
+  "assets": {
+    "authenticationSha256": "157544e680d9f23e13513d31cf46717ffa957588e21aaaebb8b5989c51766331",
+    "connectionSha256": "6a7a3b8d216493857e89cd54aeb42ee16e9080ff81ef52a425ceb085a63cbb85",
+    "addonPatchesSha256": "47b0fc9356749fd898215f2728250fec7c8a85241adf4f81ad5db023d3a0f50a",
+    "licenseSha256": "b555e38c7c140d1c336b7df3d6aa07d68c0ee05123e4b5822433a8fef2583866"
+  },
+  "derivativeSources": {
+    "runtimeConnectionSha256": "6a7a3b8d216493857e89cd54aeb42ee16e9080ff81ef52a425ceb085a63cbb85",
+    "authenticationSha256": "157544e680d9f23e13513d31cf46717ffa957588e21aaaebb8b5989c51766331",
+    "addonServerSha256": "f0ea0d561ccf7f40645c893483b1b073854dd337ee80cbee673f7303af680bbf",
+    "addonInitSha256": "1518b5dfe55d60e5b22c2d816eb461efc7d741b8955d3facc239e6ea0493b7f6"
+  }
+}

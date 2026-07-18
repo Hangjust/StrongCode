@@ -336,7 +336,7 @@ describe("tui", () => {
     expect(descriptions.join("\n")).toContain("session_list");
     expect(descriptions.join("\n")).toContain("theme_picker");
     expect(descriptions.join("\n")).toContain("reasoning_focus");
-    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/model", "/models", "/summary", "/help", "/exit"]);
+    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/computer use", "/model", "/models", "/summary", "/help", "/exit"]);
     expect(palette.find("/commands")).toBeUndefined();
     expect(palette.search("theme")).toEqual([]);
   });
@@ -380,7 +380,7 @@ describe("tui", () => {
   it("renders plugin slots and palette cursor overlays", () => {
     const runtime = createBuiltinPluginRuntime();
     const palette = createDefaultPalette();
-    palette.select(5);
+    palette.select(6);
 
     expect(runtime.render("status")).toContain("Plugin slots ready");
     expect(renderPaletteOverlay(palette.list(), palette.cursor())).toContain("> /model");
@@ -673,8 +673,9 @@ permissions:
   it("registers the supported startup slash suggestions", async () => {
     const palette = createDefaultPalette();
 
-    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/model", "/models", "/summary", "/help", "/exit"]);
+    expect(palette.list().map(command => command.slash)).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/computer use", "/model", "/models", "/summary", "/help", "/exit"]);
     expect(palette.find("/connect")?.title).toBe("Connect");
+    expect(palette.find("/computer use")?.title).toBe("Computer Use");
     expect(palette.find("/model")?.title).toBe("Model");
     expect(palette.find("/exit")?.title).toBe("Exit");
     expect(palette.find("/providers")).toBeUndefined();

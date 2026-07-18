@@ -1190,6 +1190,18 @@ async function handleSystemCommand(input: string, runtime: RuntimeState, service
     case "compact":
       await compactActiveContext(runtime.runner, runtime.agent, runtime.currentSessionId, append);
       return true;
+    case "computer-use": {
+      const submitTurn = nestedTurnSubmit ?? services.submitTurn;
+      if (!submitTurn) {
+        await append("system", "Unable to enable computer use because the turn submission path is unavailable.");
+        return true;
+      }
+      const task = input.trim().replace(/^\/computer\s+use\b/i, "").trim();
+      await submitTurn(task
+        ? `Use the computer ${/^to\b/i.test(task) ? task : `to ${task}`}`
+        : "Use the computer.");
+      return true;
+    }
     case "agent": {
       if (command.action === "list") {
         await append("system", renderAgentRoster(runtime.activeAgentId, runtime.config));
@@ -1483,17 +1495,16 @@ export function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, paren
       if (value.trim()) onSubmit(value);
     }
   });
-  const syncPromptHeight = () => setImmediate(() => {
+  const syncPromptHeight = (notifyContentChange = false) => setImmediate(() => {
     if (textarea.isDestroyed || promptOuter.isDestroyed || promptPanel.isDestroyed) return;
     const rows = promptHeightForVisualLines(textarea.editorView.getTotalVirtualLineCount() || textarea.lineCount || 1);
     textarea.height = rows;
     promptOuter.height = rows + 4;
     promptPanel.height = rows + 4;
     accent.height = rows + 4;
-    onContentChange?.();
+    if (notifyContentChange) onContentChange?.();
     renderer.requestRender();
   });
-  textarea.onContentChange = syncPromptHeight;
   if (initialValue) textarea.cursorOffset = initialValue.length;
   promptPanel.add(textarea);
 
@@ -1517,6 +1528,9 @@ export function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, paren
   });
   promptPanel.add(hint);
   syncPromptHeight();
+  renderer.once("frame", () => {
+    textarea.onContentChange = () => syncPromptHeight(true);
+  });
 
   const resize = (nextWidth: number) => {
     const bounded = Math.max(20, Math.round(nextWidth));
@@ -1524,7 +1538,7 @@ export function createPrompt(core: OpenTuiCore, renderer: OpenTuiRenderer, paren
     promptOuter.maxWidth = bounded;
     promptPanel.width = Math.max(1, bounded - 1);
     promptPanel.maxWidth = Math.max(1, bounded - 1);
-    renderer.once("frame", syncPromptHeight);
+    renderer.once("frame", () => syncPromptHeight());
     renderer.requestRender();
   };
   return { textarea, anchor: promptOuter, meta, resize };
@@ -1580,9 +1594,22 @@ export function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scro
   const completedReasoning = role === "assistant" ? sanitizeMultilineDisplayValue(reasoning, "") : "";
   if (completedReasoning.trim()) {
     let expanded = false;
+    let hovered = false;
+    const reasoningPanel = new core.BoxRenderable(renderer, {
+      width: "100%",
+      flexDirection: "column",
+      border: ["left"],
+      customBorderChars: { vertical: "┃", topLeft: "", bottomLeft: "", horizontal: " ", topRight: "", bottomRight: "", topT: "", bottomT: "", leftT: "", rightT: "", cross: "" },
+      borderColor: COLORS.border,
+      backgroundColor: COLORS.panel,
+      paddingLeft: 1,
+      paddingRight: 1,
+      marginBottom: 1
+    });
     const body = new core.TextRenderable(renderer, {
       content: completedReasoning,
       fg: COLORS.text,
+      bg: COLORS.panel,
       wrapMode: "word",
       height: "auto",
       visible: false
@@ -1592,10 +1619,18 @@ export function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scro
       width: "100%",
       height: 1,
       focusable: true,
+      backgroundColor: COLORS.panel,
+      onMouseOver: () => {
+        hovered = true;
+        refreshReasoningStyle();
+      },
+      onMouseOut: () => {
+        hovered = false;
+        refreshReasoningStyle();
+      },
       onMouseDown: event => {
         if (event.button !== 0) return;
-        header.focus();
-        renderer.focusRenderable(header);
+        event.preventDefault();
         toggleReasoning();
       },
       onKeyDown: key => {
@@ -1606,29 +1641,34 @@ export function appendMessage(core: OpenTuiCore, renderer: OpenTuiRenderer, scro
         toggleReasoning();
       }
     });
-    const label = new core.TextRenderable(renderer, { content: "[+] Reasoning", fg: COLORS.muted, height: 1, wrapMode: "none" });
-    const refreshLabelColor = (): void => {
-      label.fg = header.focused || expanded ? COLORS.primary : COLORS.muted;
+    const label = new core.TextRenderable(renderer, { content: "[+] Reasoning", fg: COLORS.muted, bg: COLORS.panel, height: 1, wrapMode: "none" });
+    const refreshReasoningStyle = (): void => {
+      const active = header.focused || expanded;
+      const background = !active && hovered ? COLORS.element : COLORS.panel;
+      header.backgroundColor = background;
+      label.bg = background;
+      label.fg = active ? COLORS.primary : hovered ? COLORS.text : COLORS.muted;
       renderer.requestRender();
     };
     const toggleReasoning = (): void => {
       const follow = shouldFollowLatest(scroll);
       expanded = !expanded;
       label.content = expanded ? "[-] Reasoning" : "[+] Reasoning";
-      refreshLabelColor();
+      refreshReasoningStyle();
       body.visible = expanded;
       followLatestAfterLayout(renderer, scroll, follow);
     };
-    header.on(core.RenderableEvents.FOCUSED, refreshLabelColor);
-    header.on(core.RenderableEvents.BLURRED, refreshLabelColor);
-    const cleanupLabelColorListeners = (): void => {
-      header.off(core.RenderableEvents.FOCUSED, refreshLabelColor);
-      header.off(core.RenderableEvents.BLURRED, refreshLabelColor);
+    header.on(core.RenderableEvents.FOCUSED, refreshReasoningStyle);
+    header.on(core.RenderableEvents.BLURRED, refreshReasoningStyle);
+    const cleanupReasoningStyleListeners = (): void => {
+      header.off(core.RenderableEvents.FOCUSED, refreshReasoningStyle);
+      header.off(core.RenderableEvents.BLURRED, refreshReasoningStyle);
     };
-    header.on(core.RenderableEvents.DESTROYED, cleanupLabelColorListeners);
+    header.on(core.RenderableEvents.DESTROYED, cleanupReasoningStyleListeners);
     header.add(label);
-    box.add(header);
-    box.add(body);
+    reasoningPanel.add(header);
+    reasoningPanel.add(body);
+    box.add(reasoningPanel);
   }
   box.add(new core.TextRenderable(renderer, { content: sanitizeMultilineDisplayValue(text, ""), fg: role === "system" ? COLORS.warning : COLORS.text, wrapMode: "word", height: "auto" }));
   if (role === "assistant") {

@@ -7,7 +7,8 @@ import { BLENDER_ADDON_PROBE_SENTINEL } from "../src/setup/blender/blender-prefe
 import {
   BLENDER_INTEGRATION_LOCK_ID,
   installBlenderIntegration,
-  type InstallBlenderIntegrationOptions
+  type InstallBlenderIntegrationOptions,
+  type LegacyInstallBlenderIntegrationOptions
 } from "../src/setup/blender/install";
 import { nodeBlenderInstallerFileSystem } from "../src/setup/blender/install-files";
 import type {
@@ -71,10 +72,10 @@ function manifests(): {
 } {
   const wheelContent = "wheel fixture";
   const addonContent = "upstream addon fixture";
-  const filename = "example-1.0.0-py3-none-any.whl";
+  const filename = "blender_mcp-1.6.4-py3-none-any.whl";
   const wheel = {
-    name: "example",
-    version: "1.0.0",
+    name: "blender-mcp",
+    version: "1.6.4",
     filename,
     url: pypiUrl(filename),
     size: Buffer.byteLength(wheelContent),
@@ -87,7 +88,7 @@ function manifests(): {
     lock: {
       schemaVersion: 1,
       target: { implementation: "cp", python: "3.11", abi: "cp311", platform: "win_amd64" },
-      roots: ["example==1.0.0"],
+      roots: ["blender-mcp==1.6.4"],
       wheels: [wheel]
     },
     provenance: {
@@ -115,7 +116,7 @@ function manifests(): {
       derivatives: []
     },
     artifacts: new Map([[filename, wheelContent], ["addon.py", addonContent]]),
-    requirements: `example==1.0.0 --hash=sha256:${wheel.sha256}\n`
+    requirements: `blender-mcp==1.6.4 --hash=sha256:${wheel.sha256}\n`
   };
 }
 
@@ -127,7 +128,7 @@ class PythonProcess implements EnvironmentProcessAdapter {
     this.requests.push(request);
     if (request.args.some(argument => argument.includes("importlib.metadata"))) {
       await this.afterDistributionProbe?.(request);
-      return { kind: "completed" as const, exitCode: 0, stdout: "__STRONGCODE_BLENDER_DISTRIBUTIONS_V1__[\"example==1.0.0\"]\n", stderr: "" };
+      return { kind: "completed" as const, exitCode: 0, stdout: "__STRONGCODE_BLENDER_DISTRIBUTIONS_V1__[\"blender-mcp==1.6.4\"]\n", stderr: "" };
     }
     if (request.args.includes("--self-test")) {
       return { kind: "completed" as const, exitCode: 0,
@@ -175,8 +176,8 @@ type Fixture = {
   readonly homePath: string;
   readonly profileConfig: string;
   readonly userResource: string;
-  readonly profile: InstallBlenderIntegrationOptions["profile"];
-  readonly options: InstallBlenderIntegrationOptions;
+  readonly profile: InstallBlenderIntegrationOptions["selection"]["profile"];
+  readonly options: LegacyInstallBlenderIntegrationOptions;
   readonly blender: BlenderProcess;
   readonly python: PythonProcess;
   readonly downloads: string[][];
@@ -236,7 +237,11 @@ async function fixture(): Promise<Fixture> {
   };
   const options: InstallBlenderIntegrationOptions = {
     homePath,
-    profile,
+    selection: {
+      flavor: "legacy",
+      profile,
+      version: { major: 4, minor: 3, patch: 2 }
+    },
     python: {
       executable: { canonicalPath: pythonPath, sha256: hash("python executable") },
       implementation: "cpython",
@@ -378,7 +383,6 @@ describe("profile-scoped Blender integration installer", () => {
   });
 
   it.each([
-    ["unsupported Blender", (value: Fixture) => ({ ...value.options, profile: { ...value.profile, version: "4.1.9" } })],
     ["unsupported Python", (value: Fixture) => ({ ...value.options, python: { ...value.options.python, version: { major: 3, minor: 12, patch: 1 } } })]
   ])("rejects %s before downloading or mutating managed targets", async (_label, change) => {
     // Given
@@ -386,7 +390,7 @@ describe("profile-scoped Blender integration installer", () => {
     const managed = targets(value);
 
     // When / Then
-    await expect(installBlenderIntegration(change(value))).rejects.toThrow(/4\.2|CPython 3\.11|win_amd64/i);
+    await expect(installBlenderIntegration(change(value))).rejects.toThrow(/CPython 3\.11|win_amd64/i);
     expect(value.downloads).toEqual([]);
     await expect(lstat(managed.runtime)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(managed.mcp, "utf8")).toBe(mcpSource);
@@ -445,6 +449,20 @@ describe("profile-scoped Blender integration installer", () => {
     expect(value.python.requests).toEqual([]);
   });
 
+  it("reverifies the copied addon after its source changes during runtime staging", async () => {
+    // Given
+    const value = await fixture();
+    const downloader = value.options.downloader;
+    if (!downloader) throw new Error("fixture downloader is required");
+
+    // When / Then
+    await expect(installBlenderIntegration({ ...value.options, downloader: { async download(artifacts, destination) {
+      await downloader.download(artifacts, destination);
+      await writeFile(path.join(value.options.addonAssetsPath, "__init__.py"), "# swapped\n", "utf8");
+    } } })).rejects.toThrow(/addon hash mismatch/i);
+    expect(value.blender.requests).toEqual([]);
+  });
+
   it("reverifies the staged wrapper immediately after environment setup and before self-test", async () => {
     // Given
     const value = await fixture();
@@ -474,14 +492,14 @@ describe("profile-scoped Blender integration installer", () => {
     // Then
     expect(result).toMatchObject({ status: "installed", profileId: value.profile.profileId });
     expect(phases).toEqual(ACTIVATION_PHASES);
-    expect(value.downloads[0]).toEqual(["example-1.0.0-py3-none-any.whl", "addon.py"]);
+    expect(value.downloads[0]).toEqual(["blender_mcp-1.6.4-py3-none-any.whl", "addon.py"]);
     expect(await readFile(path.join(managed.addon, "__init__.py"), "utf8")).toBe("# derivative addon\n");
     expect(await readFile(managed.preferences, "utf8")).toBe("managed preferences\n");
     expect((await lstat(managed.runtime)).isDirectory()).toBe(true);
     const privateConfig = JSON.parse(await readFile(managed.privateConfig, "utf8"));
     expect(Buffer.from(privateConfig.secret, "base64url")).toHaveLength(32);
     const receipt = JSON.parse(await readFile(managed.receipt, "utf8"));
-    expect(receipt).toMatchObject({ schemaVersion: 2, profileId: value.profile.profileId, telemetry: "off" });
+    expect(receipt).toMatchObject({ schemaVersion: 3, flavor: "legacy", profileId: value.profile.profileId, telemetry: "off" });
     expect(receipt.immutableTargets.map((target: { readonly path: string }) => target.path).sort()).toEqual([
       managed.addon,
       managed.privateConfig,
@@ -908,8 +926,15 @@ describe("profile-scoped Blender integration installer", () => {
       schemaVersion: 1,
       profileId: current.profileId,
       blender: current.blender,
-      artifacts: current.artifacts,
-      addonModule: current.addonModule,
+      artifacts: {
+        upstreamCommit: value.options.provenance.upstream.commit,
+        wheelSha256: value.options.provenance.artifacts[0].sha256,
+        addonSha256: value.options.provenance.artifacts[1].sha256,
+        lockSha256: hash(JSON.stringify(value.options.lock)),
+        requirementsSha256: hash(value.options.requirements),
+        target: "cp311-win_amd64"
+      },
+      addonModule: "strongcode_blender_mcp",
       telemetry: current.telemetry,
       installedAt: current.installedAt,
       targets: legacyTargets
@@ -918,7 +943,7 @@ describe("profile-scoped Blender integration installer", () => {
     // When / Then
     await expect(installBlenderIntegration(value.options)).rejects.toThrow(/--force|repair required/i);
     await installBlenderIntegration({ ...value.options, repair: true });
-    expect(JSON.parse(await readFile(managed.receipt, "utf8"))).toMatchObject({ schemaVersion: 2 });
+    expect(JSON.parse(await readFile(managed.receipt, "utf8"))).toMatchObject({ schemaVersion: 3, flavor: "legacy" });
   });
 
   it("rejects receipt-owned paths outside the exact managed set even with repair", async () => {
@@ -960,7 +985,7 @@ describe("profile-scoped Blender integration installer", () => {
     await writeFile(managed.receipt, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 
     // When / Then
-    await expect(installBlenderIntegration(value.options)).rejects.toThrow(/receipt.*invalid|target paths/i);
+    await expect(installBlenderIntegration(value.options)).rejects.toThrow(/receipt.*invalid|target paths|target roles/i);
   });
 
   it("rejects a different selected profile when a managed profile already owns the integration", async () => {
@@ -970,7 +995,11 @@ describe("profile-scoped Blender integration installer", () => {
     const otherProfile = { ...value.profile, profileId: "blender-other-profile" };
 
     // When / Then
-    await expect(installBlenderIntegration({ ...value.options, profile: otherProfile, repair: true }))
+    await expect(installBlenderIntegration({
+      ...value.options,
+      selection: { ...value.options.selection, profile: otherProfile },
+      repair: true
+    }))
       .rejects.toThrow(/different managed profile|owned/i);
   });
 
@@ -995,7 +1024,10 @@ describe("profile-scoped Blender integration installer", () => {
       : { ...value.profile, profileId: "blender-concurrent-profile" };
 
     // When / Then
-    await expect(installBlenderIntegration({ ...value.options, profile })).rejects.toThrow(/already running|lock/i);
+    await expect(installBlenderIntegration({
+      ...value.options,
+      selection: { ...value.options.selection, profile }
+    })).rejects.toThrow(/already running|lock/i);
     continueFirst?.();
     await expect(first).resolves.toMatchObject({ status: "installed" });
   });

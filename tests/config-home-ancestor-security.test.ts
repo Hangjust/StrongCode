@@ -9,7 +9,7 @@ const legacyConfigPath = path.join(
   "tests",
   "fixtures",
   "strongcode-home-v7",
-  "strongcode.config.yaml"
+  "strongcode.config.yaml.fixture"
 );
 
 function sha256(bytes: Buffer): string {

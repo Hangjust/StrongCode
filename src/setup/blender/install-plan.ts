@@ -3,9 +3,9 @@ import path from "node:path";
 import { generateBlenderPreferences } from "./blender-preferences";
 import type { GlobalBlenderConfigMergePlan } from "./config-merge";
 import { BlenderInstallError, sha256, statesEqual } from "./durable-fs";
-import { verifyDerivativeWrapperAssets, type BlenderInstallerFileSystem } from "./install-files";
-import type { InstallBlenderIntegrationOptions } from "./install";
-import { createInstallationReceipt } from "./installation-receipt";
+import { verifyDerivativeAddonAssets, verifyDerivativeWrapperAssets, type BlenderInstallerFileSystem } from "./install-files";
+import type { LegacyInstallBlenderIntegrationOptions } from "./install";
+import { createInstallationReceiptV3, type BlenderInstallationReceiptPredecessor } from "./installation-receipt";
 import type { BlenderInstallTargetPlan, PathState } from "./journal";
 import { nodeEnvironmentProcessAdapter, stageBlenderPythonEnvironment } from "./python-env";
 import type { ProbeProcessAdapter } from "./types";
@@ -39,16 +39,16 @@ export type ManagedBlenderPreStates = {
   readonly mcp: PathState;
 };
 
-export function managedBlenderPaths(options: InstallBlenderIntegrationOptions): ManagedBlenderPaths {
+export function managedBlenderPaths(options: LegacyInstallBlenderIntegrationOptions): ManagedBlenderPaths {
   const runtime = path.resolve(options.homePath, "mcps", "blender", "runtime");
   return {
     runtime,
     python: path.join(runtime, "venv", "Scripts", "python.exe"),
     wrapper: path.join(runtime, "wrapper", "strongcode-blender-wrapper.py"),
     receipt: path.resolve(options.homePath, "mcps", "blender", "installation.json"),
-    privateConfig: path.resolve(options.profile.paths.config, ADDON_MODULE, "config.json"),
-    addon: path.resolve(options.profile.paths.resources.user, "scripts", "addons", ADDON_MODULE),
-    preferences: path.resolve(options.profile.paths.config, "userpref.blend")
+    privateConfig: path.resolve(options.selection.profile.paths.config, ADDON_MODULE, "config.json"),
+    addon: path.resolve(options.selection.profile.paths.resources.user, "scripts", "addons", ADDON_MODULE),
+    preferences: path.resolve(options.selection.profile.paths.config, "userpref.blend")
   };
 }
 
@@ -56,7 +56,7 @@ export async function captureManagedBlenderPreStates(options: {
   readonly paths: ManagedBlenderPaths;
   readonly merge: GlobalBlenderConfigMergePlan;
   readonly files: BlenderInstallerFileSystem;
-  readonly mode: "install" | "repair";
+  readonly mode: "install" | "repair" | "migration";
 }): Promise<ManagedBlenderPreStates> {
   const [runtime, receipt, privateConfig, addon, preferences, permissions, mcp] = await Promise.all([
     options.files.state(options.paths.runtime),
@@ -77,6 +77,19 @@ export async function captureManagedBlenderPreStates(options: {
       if (state.kind !== "absent") {
         throw new BlenderInstallError("conflict", `Unowned Blender integration target exists: ${targetPath}`);
       }
+    }
+  } else if (options.mode === "migration") {
+    for (const [targetPath, state] of [
+      [options.paths.runtime, runtime],
+      [options.paths.privateConfig, privateConfig],
+      [options.paths.addon, addon]
+    ] as const) {
+      if (state.kind !== "absent") {
+        throw new BlenderInstallError("conflict", `Legacy migration successor target is unowned: ${targetPath}`);
+      }
+    }
+    if (receipt.kind !== "file") {
+      throw new BlenderInstallError("conflict", "Legacy migration requires the exact predecessor receipt");
     }
   } else {
     for (const [targetPath, state, expectedKind] of [
@@ -105,7 +118,7 @@ export async function captureManagedBlenderPreStates(options: {
 }
 
 export async function stageBlenderIntegration(options: {
-  readonly install: InstallBlenderIntegrationOptions;
+  readonly install: LegacyInstallBlenderIntegrationOptions;
   readonly paths: ManagedBlenderPaths;
   readonly temporaryRoot: string;
   readonly files: BlenderInstallerFileSystem;
@@ -150,8 +163,9 @@ export async function stageBlenderIntegration(options: {
     }
   }
   await options.files.copyDirectory(install.addonAssetsPath, addon);
+  await verifyDerivativeAddonAssets({ addonAssetsPath: addon, provenance: install.provenance, files: options.files });
   await generateBlenderPreferences({
-    profile: install.profile,
+    profile: install.selection.profile,
     temporaryRoot: options.temporaryRoot,
     configDirectory,
     scriptsDirectory,
@@ -167,7 +181,7 @@ export async function stageBlenderIntegration(options: {
     addon,
     preferences,
     privateConfig: JSON.stringify({
-      profileId: install.profile.profileId,
+      profileId: install.selection.profile.profileId,
       schemaVersion: 1,
       secret: randomBytes(32).toString("base64url")
     })
@@ -175,25 +189,28 @@ export async function stageBlenderIntegration(options: {
 }
 
 export async function createBlenderTargetPlans(options: {
-  readonly install: InstallBlenderIntegrationOptions;
+  readonly install: LegacyInstallBlenderIntegrationOptions;
   readonly paths: ManagedBlenderPaths;
   readonly merge: GlobalBlenderConfigMergePlan;
   readonly staged: StagedBlenderIntegration;
   readonly files: BlenderInstallerFileSystem;
   readonly preStates: ManagedBlenderPreStates;
+  readonly predecessor?: BlenderInstallationReceiptPredecessor;
+  readonly removalPlans?: readonly BlenderInstallTargetPlan[];
 }): Promise<readonly BlenderInstallTargetPlan[]> {
   const immutableTargets = [
-    { path: options.paths.privateConfig, state: fileState(options.staged.privateConfig) },
-    { path: options.paths.addon, state: await options.files.state(options.staged.addon) },
-    { path: options.paths.runtime, state: await options.files.state(options.staged.runtime) }
+    { role: "private-config" as const, path: options.paths.privateConfig, state: fileState(options.staged.privateConfig) },
+    { role: "addon" as const, path: options.paths.addon, state: await options.files.state(options.staged.addon) },
+    { role: "runtime" as const, path: options.paths.runtime, state: await options.files.state(options.staged.runtime) }
   ];
-  const receipt = createInstallationReceipt({ profile: options.install.profile, lock: options.install.lock,
-    provenance: options.install.provenance, requirements: options.install.requirements, immutableTargets,
+  const receipt = createInstallationReceiptV3({ flavor: "legacy", profile: options.install.selection.profile,
+    python: options.install.python, lock: options.install.lock, provenance: options.install.provenance,
+    requirements: options.install.requirements, immutableTargets,
     managed: {
       mcp: { path: options.merge.mcp.filePath, fragmentSha256: options.merge.mcp.fragmentSha256 },
       permissions: { path: options.merge.permissions.filePath, fragmentSha256: options.merge.permissions.fragmentSha256 },
       preferencesPath: options.paths.preferences
-    } });
+    }, predecessor: options.predecessor });
   return [
     { canonicalPath: options.paths.privateConfig, activationPhase: "credential_active", private: true,
       requiredPreState: options.preStates.privateConfig,
@@ -213,6 +230,7 @@ export async function createBlenderTargetPlans(options: {
     { canonicalPath: options.merge.mcp.filePath, activationPhase: "mcp_active",
       requiredPreState: options.preStates.mcp,
       staged: { kind: "file", content: options.merge.mcp.content } },
+    ...(options.removalPlans ?? []),
     { canonicalPath: options.paths.receipt, activationPhase: "state_active",
       requiredPreState: options.preStates.receipt,
       staged: { kind: "file", content: `${JSON.stringify(receipt, null, 2)}\n` } }

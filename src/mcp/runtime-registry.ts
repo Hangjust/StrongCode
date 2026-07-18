@@ -60,7 +60,7 @@ function gatewayTools(manager: McpManager): Tool[] {
         const parsed = listInputSchema.safeParse(input);
         if (!parsed.success) return err(new StrongCodeError("VALIDATION_ERROR", parsed.error.message));
         try {
-          const tools = await manager.listTools(parsed.data.server, context.effectivePermissions);
+          const tools = await manager.listTools(parsed.data.server, context);
           return ok({ content: tools.map(tool => `${tool.name}${tool.description ? ` - ${tool.description}` : ""}`).join("\n") });
         } catch (error) {
           return errorResult(error instanceof Error ? error : new Error(String(error)));
@@ -99,7 +99,7 @@ function gatewayTools(manager: McpManager): Tool[] {
         );
         if (!nestedAllowed.ok) return nestedAllowed;
         try {
-          return ok({ content: await manager.callTool(parsed.data.server, parsed.data.tool, parsed.data.arguments, context.effectivePermissions) });
+          return ok({ content: await manager.callTool(parsed.data.server, parsed.data.tool, parsed.data.arguments, context) });
         } catch (error) {
           return errorResult(error instanceof Error ? error : new Error(String(error)));
         }
@@ -140,10 +140,11 @@ function webSearchTool(manager: McpManager): Tool | undefined {
             provider.server,
             provider.tool,
             { [provider.queryParameter]: parsed.data.query },
-            context.effectivePermissions
+            context
           );
           return ok({ content: `[provider: ${provider.server}]\n${content}` });
         } catch (error) {
+          if (error instanceof StrongCodeError && error.code === "PERMISSION_DENIED") return err(error);
           failures.push(`${provider.server}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
@@ -166,7 +167,7 @@ function directMcpTool(manager: McpManager, serverId: string, sdkTool: Awaited<R
     async execute(input, context) {
       if (!input || typeof input !== "object" || Array.isArray(input)) return err(new StrongCodeError("VALIDATION_ERROR", "MCP tool input must be an object"));
       try {
-        return ok({ content: await manager.callTool(serverId, sdkTool.name, input as Record<string, unknown>, context.effectivePermissions) });
+        return ok({ content: await manager.callTool(serverId, sdkTool.name, input as Record<string, unknown>, context) });
       } catch (error) {
         return errorResult(error instanceof Error ? error : new Error(String(error)));
       }

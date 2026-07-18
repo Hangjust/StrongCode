@@ -67,6 +67,12 @@ async function restoreBackup(journalPath: string, target: BlenderInstallTarget, 
   if (temporaryState.kind === "absent") await copyPathDurable(target.backup.canonicalPath, temporary, target.private);
   else if (!statesEqual(temporaryState, target.preState)) throw new BlenderInstallError("conflict", `Restore temporary hash mismatch: ${temporary}`);
   if (target.private && target.preState.kind === "file") await protectPrivateFile(temporary);
+  if (target.expectedPost.kind === "absent") {
+    await rename(temporary, target.canonicalPath);
+    await syncDirectory(path.dirname(target.canonicalPath));
+    await options.fault?.("after-rollback-restored");
+    return;
+  }
   if (target.preState.kind === "directory") {
     const transactionDirectory = layoutFromJournalPath(journalPath).transactionDirectory;
     const evidenceDirectory = path.join(transactionDirectory, "rollback-evidence");
@@ -190,7 +196,7 @@ export async function rollbackBlenderInstall(
       await writeBlenderInstallJournal(journalPath, journal);
       continue;
     }
-    if (target.status === "activating" && observed.kind === "absent" && target.preState.kind === "directory"
+    if (target.status === "activating" && observed.kind === "absent" && target.preState.kind !== "absent"
       && statesEqual(displacedState, target.preState)) {
       await rename(displaced, target.canonicalPath);
       await syncDirectory(path.dirname(target.canonicalPath));

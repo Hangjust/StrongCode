@@ -121,16 +121,16 @@ Run the one-time global setup:
 strongcode setup
 ```
 
-On the first interactive setup, StrongCode performs read-only Blender detection. Completed users who have not seen the current Blender offer receive the same detection on a later interactive no-argument launch, without rerunning provider onboarding. A compatible Blender 4.2+ profile and 64-bit CPython 3.11 on Windows are required before it displays one default-deny installation consent prompt. Declining suppresses that offer version; cancellation or missing prerequisites remain eligible for a later launch. None of those outcomes changes Blender. To run only this integration setup, without rerunning provider onboarding, use:
+On the first interactive setup, StrongCode performs read-only Blender detection. Completed users who have not seen the current Blender offer receive the same detection on a later interactive no-argument launch, without rerunning provider onboarding. A compatible stable Blender 4.2+ profile and 64-bit CPython 3.11 on Windows are required before it displays one default-deny installation consent prompt. Blender 4.2 through 5.0 uses the pinned legacy `blender-mcp` 1.6.4 integration; Blender 5.1 and newer uses the pinned official Blender Lab MCP 1.0.0 integration. Declining suppresses that offer version; cancellation or missing prerequisites remain eligible for a later launch. None of those outcomes changes Blender. To run only this integration setup, without rerunning provider onboarding, use:
 
 ```sh
 strongcode setup --blender
 strongcode setup --blender --force
 ```
 
-`strongcode setup --blender` verifies an existing owned installation without changing managed Blender or profile artifacts and refreshes StrongCode metadata only; `--force` performs a newly consented installation or repair.
+`strongcode setup --blender` verifies an existing same-flavor owned installation without changing managed Blender or profile artifacts. If the selected Blender version routes to the other flavor, it fails with migration guidance. Existing users are never migrated by the automatic offer: rerun `strongcode setup --blender --force` and grant fresh consent. That command performs a newly consented install, same-flavor repair, or transactional migration of an exactly owned healthy v3 installation; it can also migrate an exactly owned healthy legacy v2 installation to the official flavor. Legacy v1, unowned, or drifted predecessor targets are never adopted or deleted.
 
-The persisted addon and preferences enable automatic startup of the addon on future Blender GUI launches. The Blender-only command requires an interactive TTY. Installation uses pinned, hash-verified assets, a private runtime, transactional rollback, and an authenticated ephemeral loopback listener. It does not install Python or uv, create OS autostart, or modify project configuration.
+The persisted addon or extension and preferences enable automatic startup on future Blender GUI launches. The Blender-only command requires an interactive TTY. Installation and migration use flavor-isolated pinned assets, private runtimes, exact ownership receipts, and transactional rollback. The official flavor remains Blender Lab MCP v1.0.0, installs only into Blender's discovered `<EXTENSIONS>/user_default/mcp` location, and applies a reviewed StrongCode derivative only after exact upstream archive and source-context verification. Every execute request uses canonical JSON, a fresh cryptographic nonce, and HMAC-SHA256 with replay rejection. The bridge binds literal `127.0.0.1` on a generated high port; its 32-byte secret is stored only in a private profile config protected by ACL or mode `0600`. Public MCP configuration contains only the private config path. Blender's global Online Access setting must already be enabled; StrongCode checks it but does not enable it. All official Blender MCP tools remain `ask` and are denied noninteractively. The legacy flavor uses its authenticated ephemeral loopback listener. StrongCode does not install Python or uv, create OS autostart, or modify project configuration.
 
 The global setup config is used automatically in directories without a project config, while the active working directory remains the model/tool workspace. To override it for one repository, initialize a project config:
 
@@ -364,6 +364,7 @@ The generated home catalog includes:
 - TinyFish as the Exa web-search fallback. TinyFish uses OAuth 2.1; StrongCode opens the browser on first explicit use, receives the loopback callback, and stores refresh/access tokens privately under `credentials/mcp/` in StrongCode home.
 - Semble, Graphify, Playwright, Chrome DevTools, GitHub MCP, and Headroom as enabled lazy servers. Graphify activates only when `graphify-out/graph.json` exists; the hosted GitHub server requires `GITHUB_PERSONAL_ACCESS_TOKEN` because generic hosts cannot reuse another application's GitHub OAuth registration.
 - Playwright for isolated browser automation, and Chrome DevTools for console, network, debugging, and performance inspection. Both set `autoStart: false`, deferring overlapping schemas and startup cost until an explicit `mcp_list_tools` or `mcp_call`. They run from the trusted config directory rather than the active workspace; Playwright writes artifacts under `cache/playwright-mcp` there. Chrome DevTools MCP `1.6.0` requires Node `20.19+` and an available Chrome or Chrome for Testing installation.
+- Open Computer Use for cross-platform desktop inspection and UI automation. It is enabled but turn-gated, runs from the trusted config directory, and is never classified as read-only.
 - Caveman's `caveman-shrink@0.1.0` around compatible local search/graph MCP servers to shrink tool descriptions without installing the Caveman skill. Playwright stays direct because its current MCP process is not compatible with that proxy.
 - Brave Search as a disabled opt-in fallback. DuckDuckGo search-only, self-hosted Firecrawl, and self-hosted SearXNG remain disabled templates because their deployment/package endpoints are user-specific; add a reviewed server entry and then opt it into `webSearch.providers`.
 
@@ -376,7 +377,81 @@ GITHUB_PERSONAL_ACCESS_TOKEN=...
 BRAVE_API_KEY=...
 ```
 
-Local packages are version-pinned in the generated catalog and fetched through `npx -y`, with no project dependency. Browser packages also pin the canonical npm registry before the package name so project npm configuration cannot redirect resolution. Packages are fetched only when their lazy server is explicitly discovered/called or when the user changes that server to `autoStart: true`. Native Windows launches run `npx` directly, not `cmd /c`.
+Local packages are version-pinned in the generated catalog and fetched through `npx -y`, with no project dependency. Browser packages also pin the canonical npm registry before the package name so project npm configuration cannot redirect resolution. Packages are fetched only when their lazy server is explicitly discovered/called or when the user changes that server to `autoStart: true`. StrongCode stores and launches a fixed argument vector rather than user-authored shell text. On Windows, npm executable resolution may still run the `npx.cmd` shim through `cmd.exe /c`; that wrapper is an npm/platform launch detail, not configurable command text.
+
+### Open Computer Use
+
+The generated trusted-home catalog pins Open Computer Use to the canonical npm registry, exact package version, and required MCP subcommand:
+
+```text
+npx --registry https://registry.npmjs.org/ --yes open-computer-use@0.2.0 mcp
+```
+
+Ordinary StrongCode startup neither fetches the package nor starts its native process. StrongCode excludes this server from automatic MCP startup even if a customized catalog sets `autoStart: true`. On the first turn where the user explicitly requests computer use, `npx` may fetch the pinned package into the npm cache and run its package lifecycle script before launching the MCP server. StrongCode adds no global installation, project dependency, lockfile entry, separate native-runtime download, token saver, or environment-variable requirement. The npm package already bundles native 64-bit binaries for all six supported targets: `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-arm64`, and `win32-x64`.
+
+The host OS must provide a signed-in graphical session and its normal accessibility stack:
+
+- macOS requires Accessibility and Screen Recording permission for real inspection or control.
+- Windows requires an interactive signed-in desktop and Windows UI Automation; service or SSH-only sessions are not suitable for desktop control.
+- Linux requires a logged-in graphical desktop with AT-SPI2 and D-Bus. Screenshot and coordinate behavior under Wayland remains compositor-dependent.
+
+The trusted generated config includes `mcp__open_computer_use__*` with the default permission `allow`, but permission alone does not expose or authorize it. StrongCode removes its direct tools from ordinary model requests and rejects generic MCP discovery/calls unless the current user turn explicitly asks to use or control the computer. `/computer use [task]` is the deterministic command form; activation lasts for that turn only. Because Open Computer Use is not read-only, an activated allowed agent can inspect applications and perform mouse, keyboard, scrolling, text, and value actions without a separate per-call approval. Treat it as privileged desktop-control code; a more restrictive user should set that namespace to `ask` or `deny`. Explicit deny rules and StrongCode's untrusted-project restrictions continue to take precedence.
+
+Accessibility text, application resources, and other inspection results returned by Open Computer Use may be sent to the configured model and recorded in StrongCode session history. Avoid using it while sensitive applications, credentials, private messages, or confidential documents are open.
+
+New homes receive this entry automatically. Existing homes change only after explicit expansion:
+
+```powershell
+npm install
+npm run build
+node .\dist\cli.js home --expand
+```
+
+Here `npm install` installs StrongCode's repository dependencies only; it does not globally install Open Computer Use. Expansion upgrades only byte-identical recognized generated files. If `mcp.json`, `strongcode.config.yaml`, or another generated sibling was customized, StrongCode preserves its bytes and reports it for manual merge. Add this server object under `mcpServers` in a customized `mcp.json`:
+
+```json
+"open_computer_use": {
+  "enabled": true,
+  "autoStart": false,
+  "type": "local",
+  "description": "Cross-platform desktop inspection and UI automation through Open Computer Use's bundled native runtime.",
+  "readOnly": false,
+  "workingDirectory": "config",
+  "timeout": { "startupMs": 180000, "requestMs": 120000 },
+  "command": ["npx", "--registry", "https://registry.npmjs.org/", "--yes", "open-computer-use@0.2.0", "mcp"]
+}
+```
+
+Also add the gateway tools and namespace once to the selected agent's tools and permissions in a customized `strongcode.config.yaml`:
+
+```yaml
+agents:
+  tesla:
+    tools:
+      - mcp_list_tools
+      - mcp_call
+      - "mcp__open_computer_use__*"
+permissions:
+  tools:
+    mcp_list_tools: allow
+    mcp_call: allow
+    "mcp__open_computer_use__*": allow
+```
+
+Do not add duplicate tool or permission entries if the customized YAML already contains any of these names.
+
+The real-package smoke test is deliberately opt-in. It uses temporary StrongCode-home and npm-cache directories, starts the bundled runtime, performs only MCP initialization and `tools/list`, asserts the nine canonical tool names, and then closes and removes temporary state. On Darwin only, the smoke sets `OPEN_COMPUTER_USE_DISABLE_APP_AGENT_PROXY=1` and exposes that variable only to its temporary server so the upstream app-agent proxy cannot survive MCP proxy EOF; the test restores the caller's prior environment afterward. The generated production catalog keeps `environmentFromEnv` empty and never receives this smoke-only variable. Initialization and `tools/list` prove only that the package starts and advertises its tools; they do not validate StrongCode permission enforcement, accessibility authorization, or real UI inspection/control. The smoke never invokes a desktop-control tool, but it still uses the network and executes npm lifecycle/native process code:
+
+```powershell
+$env:STRONGCODE_REAL_OPEN_COMPUTER_USE_SMOKE = "1"
+try {
+  npm test -- tests/mcp-open-computer-use-smoke.test.ts
+} finally {
+  Remove-Item Env:STRONGCODE_REAL_OPEN_COMPUTER_USE_SMOKE -ErrorAction SilentlyContinue
+}
+```
+
+Without that environment variable, the smoke test is skipped and does not fetch or launch anything.
 
 ## Sessions
 

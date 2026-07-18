@@ -1,5 +1,6 @@
 import type { Agent } from "../src/agents/agent";
 import { AgentRunner } from "../src/agents/runner";
+import { resolveRunnerLoopLimits } from "../src/agents/runner-loop-limits";
 import { StrongCodeError, type StrongCodeErrorCode } from "../src/core/errors";
 import { err } from "../src/core/result";
 import type { ModelProvider, ModelRequest, ModelResponse } from "../src/models/provider";
@@ -31,6 +32,15 @@ function failingTool(name: string, code: StrongCodeErrorCode): Tool {
 }
 
 describe("AgentRunner bounded model-tool loop", () => {
+  it("defaults normal runs to a 500-call tool budget", () => {
+    // Given / When
+    const limits = resolveRunnerLoopLimits({});
+
+    // Then
+    expect(limits.maxToolCallsPerStep).toBe(500);
+    expect(limits.maxTotalToolCalls).toBe(500);
+  });
+
   it("returns a final answer after exactly two correlated completions", async () => {
     // Given
     const firstReasoning = "Inspect the helper before answering.";

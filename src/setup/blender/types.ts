@@ -14,6 +14,7 @@ export type BlenderPaths = {
   };
   readonly config: string;
   readonly scripts: readonly string[];
+  readonly extensions?: string;
 };
 
 export type BlenderProfileCandidate = {

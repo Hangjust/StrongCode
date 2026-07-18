@@ -7,10 +7,18 @@ import {
   parseWheelLockJson
 } from "./artifact-manifest";
 import { StrongCodeError } from "../../core/errors";
+import { blenderIntegrationConsentDetails } from "./consent";
+import { discoveryEnvironment } from "./discovery-environment";
 import { discoverBlenderSetup } from "./discovery";
 import { installBlenderIntegration } from "./install";
 import { parseLockedRequirements } from "./python-env";
-import type { BlenderProfileCandidate } from "./types";
+import { OFFICIAL_BLENDER_MCP_PATHS } from "./official-artifact-manifest";
+import {
+  parseOfficialArtifactCatalogJson,
+  parseOfficialRequirements,
+  parseOfficialWheelLockJson
+} from "./official-artifact-parser";
+import { selectBlenderIntegration } from "./selection";
 import { SetupCancelledError, type InstalledBlenderIntegration, type SetupPrompter, type SetupState } from "../types";
 
 export type BlenderSetupDependencies = {
@@ -62,14 +70,25 @@ export async function setupBlenderIntegration(
   const environment = dependencies.env ?? process.env;
   const discovery = await (dependencies.discover ?? discoverBlenderSetup)({
     workspace: options.workspace,
-    env: discoveryEnvironment(normalizeDiscoveryEnvironmentForPlatform(environment, platform)),
+    env: discoveryEnvironment(environment, platform),
     platform
   });
   if (discovery.profiles.length === 0) return { status: "not-found", state: options.state };
 
-  const profiles = discovery.profiles.filter(profile => blenderVersionSupported(profile.version));
-  if (profiles.length === 0) {
-    options.prompter.note("Blender was found, but StrongCode requires Blender 4.2 or newer. Upgrade Blender, then run strongcode setup --blender.");
+  const selections = discovery.profiles.flatMap(profile => {
+    const result = selectBlenderIntegration(profile);
+    switch (result.kind) {
+      case "selected":
+        return [result.selection];
+      case "malformed":
+      case "unsupported":
+        return [];
+      default:
+        return unsupportedSelectionResult(result);
+    }
+  });
+  if (selections.length === 0) {
+    options.prompter.note("Blender was found, but StrongCode requires a stable Blender version 4.2.0 or newer. Upgrade Blender, then run strongcode setup --blender.");
     return { status: "prerequisite-missing", state: options.state };
   }
   if (platform !== "win32" || architecture !== "x64" || !exactPythonPrerequisite(discovery.python)) {
@@ -78,54 +97,91 @@ export async function setupBlenderIntegration(
   }
 
   try {
-    const selectedProfileId = profiles.length === 1
-      ? profiles[0]?.profileId
+    const selectedProfileId = selections.length === 1
+      ? selections[0]?.profile.profileId
       : await options.prompter.select(
         "Blender profile",
-        profiles.map(candidate => ({
-          value: candidate.profileId,
-          label: `Blender ${candidate.version}`,
-          hint: `${candidate.executable.canonicalPath} · ${candidate.profileId}`
+        selections.map(candidate => ({
+          value: candidate.profile.profileId,
+          label: `Blender ${candidate.profile.version}`,
+          hint: `${candidate.profile.executable.canonicalPath} · ${candidate.profile.profileId}`
         }))
       );
-    const profile = profiles.find(candidate => candidate.profileId === selectedProfileId);
-    if (!profile) throw new SetupCancelledError();
+    const selection = selections.find(candidate => candidate.profile.profileId === selectedProfileId);
+    if (!selection) throw new SetupCancelledError();
+    const profile = selection.profile;
 
-    const assetRoot = path.resolve(dependencies.assetRootPath ?? path.join(__dirname, "..", "..", "..", "assets", "blender-mcp"));
-    const [provenanceSource, lockSource, requirementsSource] = await Promise.all([
-      readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.provenance), "utf8"),
-      readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.wheels), "utf8"),
-      readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.requirements), "utf8")
-    ]);
-    const provenance = parseArtifactProvenanceJson(provenanceSource);
-    const lock = parseWheelLockJson(lockSource);
-    const requirements = parseLockedRequirements(lock, requirementsSource);
     const receiptPath = path.resolve(options.homePath, "mcps", "blender", "installation.json");
-    const verifiesOwnedInstall = options.mode === "explicit" && !options.force
+    const verifiesOwnedInstall = !options.force
       && (options.state.blender !== undefined || existsSync(receiptPath));
-    if (!verifiesOwnedInstall) {
-      options.prompter.note(consentDetails(profile, provenance.artifacts[0].sha256, provenance.artifacts[1].sha256));
-      if (!await options.prompter.confirm("Install the StrongCode Blender integration with these exact settings?", false)) {
-        return { status: "declined", state: options.state };
-      }
-    }
-
-    const installed = await (dependencies.install ?? installBlenderIntegration)({
+    const installer = dependencies.install ?? installBlenderIntegration;
+    const commonInstallOptions = {
       homePath: options.homePath,
-      profile,
       python: discovery.python,
       platform,
       architecture,
-      lock,
-      provenance,
-      requirements,
-      wrapperAssetsPath: path.join(assetRoot, "runtime-wrapper"),
-      addonAssetsPath: path.join(assetRoot, "addon", "strongcode_blender_mcp"),
       repair: options.force ?? false,
       verifyOnly: verifiesOwnedInstall,
       env: environment
-    });
+    };
+    let installed: Awaited<ReturnType<typeof installBlenderIntegration>>;
+    switch (selection.flavor) {
+      case "official": {
+        const assetRoot = path.resolve(dependencies.assetRootPath ?? path.join(__dirname, "..", "..", "..", "assets", "blender-mcp"));
+        const [catalogSource, lockSource, requirements] = await Promise.all([
+          readFile(path.join(assetRoot, OFFICIAL_BLENDER_MCP_PATHS.catalog), "utf8"),
+          readFile(path.join(assetRoot, OFFICIAL_BLENDER_MCP_PATHS.wheels), "utf8"),
+          readFile(path.join(assetRoot, OFFICIAL_BLENDER_MCP_PATHS.requirements), "utf8")
+        ]);
+        const catalog = parseOfficialArtifactCatalogJson(catalogSource);
+        const lock = parseOfficialWheelLockJson(lockSource);
+        parseOfficialRequirements(lock, requirements);
+        if (!verifiesOwnedInstall) {
+          options.prompter.note(blenderIntegrationConsentDetails(
+            selection,
+            catalog.release.assets[0].sha256,
+            catalog.release.assets[1].sha256
+          ));
+          if (!await options.prompter.confirm("Install the StrongCode Blender integration with these exact settings?", false)) {
+            return { status: "declined", state: options.state };
+          }
+        }
+        installed = await installer({ ...commonInstallOptions, selection, catalog, lock, requirements,
+          derivativeAssetsPath: path.join(assetRoot, "official-derivative") });
+        break;
+      }
+      case "legacy": {
+        const assetRoot = path.resolve(dependencies.assetRootPath ?? path.join(__dirname, "..", "..", "..", "assets", "blender-mcp"));
+        const [provenanceSource, lockSource, requirementsSource] = await Promise.all([
+          readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.provenance), "utf8"),
+          readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.wheels), "utf8"),
+          readFile(path.join(assetRoot, BLENDER_MCP_MANIFEST_PATHS.requirements), "utf8")
+        ]);
+        const provenance = parseArtifactProvenanceJson(provenanceSource);
+        const lock = parseWheelLockJson(lockSource);
+        const requirements = parseLockedRequirements(lock, requirementsSource);
+        if (!verifiesOwnedInstall) {
+          options.prompter.note(blenderIntegrationConsentDetails(selection, provenance.artifacts[0].sha256, provenance.artifacts[1].sha256));
+          if (!await options.prompter.confirm("Install the StrongCode Blender integration with these exact settings?", false)) {
+            return { status: "declined", state: options.state };
+          }
+        }
+        installed = await installer({
+          ...commonInstallOptions,
+          selection,
+          lock,
+          provenance,
+          requirements,
+          wrapperAssetsPath: path.join(assetRoot, "runtime-wrapper"),
+          addonAssetsPath: path.join(assetRoot, "addon", "strongcode_blender_mcp")
+        });
+        break;
+      }
+      default:
+        return unsupportedSelectionResult(selection);
+    }
     const verifiedIdentity = {
+      flavor: selection.flavor,
       profileId: installed.profileId,
       version: profile.version,
       executablePath: profile.executable.canonicalPath,
@@ -136,6 +192,7 @@ export async function setupBlenderIntegration(
       installedAt: installed.status === "already-installed"
         && originalBlender !== undefined
         && originalBlender.profileId === verifiedIdentity.profileId
+        && originalBlender.flavor === verifiedIdentity.flavor
         && originalBlender.version === verifiedIdentity.version
         && originalBlender.executablePath === verifiedIdentity.executablePath
         && originalBlender.receiptPath === verifiedIdentity.receiptPath
@@ -156,9 +213,8 @@ export async function setupBlenderIntegration(
   }
 }
 
-function blenderVersionSupported(version: string): boolean {
-  const parsed = /^(\d+)\.(\d+)(?:\.|$)/u.exec(version);
-  return parsed !== null && (Number(parsed[1]) > 4 || (Number(parsed[1]) === 4 && Number(parsed[2]) >= 2));
+function unsupportedSelectionResult(result: never): never {
+  throw new StrongCodeError("CONFIG_ERROR", `Unsupported Blender selection result: ${JSON.stringify(result)}`);
 }
 
 function exactPythonPrerequisite(python: Awaited<ReturnType<typeof discoverBlenderSetup>>["python"]): python is NonNullable<typeof python> {
@@ -167,75 +223,4 @@ function exactPythonPrerequisite(python: Awaited<ReturnType<typeof discoverBlend
     && python.version.minor === 11
     && python.pointerWidth === 64
     && python.sysconfigPlatform === "win_amd64";
-}
-
-const DISCOVERY_ENVIRONMENT = [
-  "APPDATA",
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LOCALAPPDATA",
-  "PATH",
-  "PATHEXT",
-  "ProgramFiles",
-  "ProgramW6432",
-  "PROGRAMDATA",
-  "SystemRoot",
-  "TEMP",
-  "TMP",
-  "USERPROFILE",
-  "WINDIR"
-] as const;
-
-function conflictAliasError(canonicalName: string, first: string, second: string): never {
-  throw new StrongCodeError(
-    "CONFIG_ERROR",
-    `Conflicting environment aliases for ${canonicalName}: ${first} and ${second}`
-  );
-}
-
-function normalizeDiscoveryEnvironmentForPlatform(source: NodeJS.ProcessEnv, platform: NodeJS.Platform): NodeJS.ProcessEnv {
-  if (platform !== "win32") {
-    return source;
-  }
-
-  const discovered = new Map<string, string>();
-  const canonicalByKey = new Map<string, string>();
-
-  for (const [name, value] of Object.entries(source)) {
-    if (value === undefined) continue;
-
-    const canonicalName = DISCOVERY_ENVIRONMENT.find(candidate => candidate.toUpperCase() === name.toUpperCase());
-    if (canonicalName === undefined) continue;
-
-    const firstAlias = canonicalByKey.get(canonicalName);
-    if (firstAlias === undefined) {
-      discovered.set(canonicalName, value);
-      canonicalByKey.set(canonicalName, name);
-      continue;
-    }
-
-    const firstValue = discovered.get(canonicalName);
-    if (firstValue !== value) conflictAliasError(canonicalName, firstAlias, name);
-  }
-
-  return Object.fromEntries(discovered.entries());
-}
-
-function discoveryEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    DISCOVERY_ENVIRONMENT.flatMap(name => source[name] === undefined ? [] : [[name, source[name]]])
-  );
-}
-
-function consentDetails(profile: BlenderProfileCandidate, wheelSha256: string, addonSha256: string): string {
-  return [
-    `Blender: ${profile.executable.canonicalPath} · version ${profile.version} · profile ${profile.profileId}.`,
-    `Pinned blender-mcp 1.6.4 · wheel SHA-256 ${wheelSha256} · addon SHA-256 ${addonSha256}.`,
-    "Installs a private StrongCode runtime and persists the addon plus Blender preferences so it auto-enables on future GUI launches.",
-    `Persisted Blender targets: addon under ${profile.paths.resources.user}; preferences and private settings under ${profile.paths.config}.`,
-    "A GUI launch starts an authenticated ephemeral loopback listener. The Blender MCP is read/write; execute_blender_code remains ask and is denied noninteractively.",
-    "Telemetry and remote providers are off. StrongCode does not install Python or uv, create OS autostart, or modify project configuration.",
-    "Installation is transactional and includes rollback of managed files and configuration if commit fails."
-  ].join("\n");
 }

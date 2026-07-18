@@ -1,0 +1,65 @@
+version: 1
+workspace: .
+dataDir: .
+defaultAgent: tesla
+providers:
+  mock:
+    type: mock
+    displayName: Mock
+    enabled: true
+agents:
+  tesla:
+    model: mock
+    tools:
+      - "question"
+      - "list_files"
+      - "read_file"
+      - "find_files"
+      - "ripgrep"
+      - "write_file"
+      - "edit_file"
+      - "delete_path"
+      - "shell"
+      - "web_search"
+      - "mcp_list_tools"
+      - "mcp_call"
+      - "mcp__context7__*"
+      - "mcp__grep_app__*"
+      - "mcp__graphify__*"
+      - "mcp__semble__*"
+      - "mcp__playwright__*"
+      - "mcp__chrome_devtools__*"
+      - "mcp__github__*"
+      - "mcp__exa__*"
+      - "mcp__tinyfish__*"
+      - "mcp__headroom__*"
+models:
+  mock:
+    provider: mock
+    model: mock
+    displayName: Mock
+    enabled: true
+permissions:
+  tools:
+    "question": allow
+    "list_files": allow
+    "read_file": allow
+    "find_files": allow
+    "ripgrep": allow
+    "write_file": allow
+    "edit_file": allow
+    "delete_path": allow
+    "shell": allow
+    "web_search": allow
+    "mcp_list_tools": allow
+    "mcp_call": allow
+    "mcp__context7__*": allow
+    "mcp__grep_app__*": allow
+    "mcp__graphify__*": allow
+    "mcp__semble__*": allow
+    "mcp__playwright__*": allow
+    "mcp__chrome_devtools__*": allow
+    "mcp__github__*": allow
+    "mcp__exa__*": allow
+    "mcp__tinyfish__*": allow
+    "mcp__headroom__*": allow

@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "mcp_to_blender_server.py",
+      "upstreamSha256": "4080b91fb4f8b648209ba850acbfa143e8d2ede385f1d7db5c198e483304e50a",
+      "replacements": [
+        {
+          "before": "from typing import NamedTuple\n",
+          "after": "from typing import NamedTuple\n\nfrom . import strongcode_auth\n"
+        },
+        {
+          "before": "DEFAULT_HOST = \"localhost\"\nDEFAULT_PORT = 9876\n",
+          "after": "DEFAULT_HOST = \"127.0.0.1\"\nDEFAULT_PORT = 49152\n"
+        },
+        {
+          "before": "_state = _State()\n\n\nclass _ExecResult",
+          "after": "_state = _State()\n_private_config: strongcode_auth.PrivateConfig | None = None\n_replay_guard = strongcode_auth.ReplayGuard()\n\n\ndef configure_private_config(config_path: str) -> strongcode_auth.PrivateConfig:\n    global _private_config\n    _private_config = strongcode_auth.load_private_config(config_path)\n    return _private_config\n\n\ndef _require_private_config() -> strongcode_auth.PrivateConfig:\n    if _private_config is None:\n        raise strongcode_auth.AuthenticationError(reason=\"StrongCode private bridge config was not provided\")\n    return _private_config\n\n\nclass _ExecResult"
+        },
+        {
+          "before": "    request = json.loads(data)\n\n    if request.get(\"type\") != \"execute\":",
+          "after": "    code, strict_json = strongcode_auth.authenticate_execute_request(\n        data, _require_private_config(), _replay_guard\n    )\n    request = {\"type\": \"execute\", \"code\": code, \"strict_json\": strict_json}\n\n    if request.get(\"type\") != \"execute\":"
+        },
+        {
+          "before": "    if is_running():\n        raise RuntimeError(\"Server is already running\")\n\n    sock = socket.socket",
+          "after": "    config = _require_private_config()\n    if host != config.host or port != config.port:\n        raise strongcode_auth.AuthenticationError(reason=\"bridge endpoint does not match the private config\")\n    if is_running():\n        raise RuntimeError(\"Server is already running\")\n\n    sock = socket.socket"
+        }
+      ]
+    },
+    {
+      "path": "__init__.py",
+      "upstreamSha256": "42c618aa4cab373529524fd58c6f26b8c84d56ffef17b2db1edc2df3be914c8d",
+      "replacements": [
+        {
+          "before": "    port: IntProperty(  # type: ignore[valid-type]\n        name=\"Port\",\n        default=mcp_to_blender_server.DEFAULT_PORT,\n        min=_PORT_MIN,\n        max=_PORT_MAX,\n    )\n",
+          "after": "    port: IntProperty(  # type: ignore[valid-type]\n        name=\"Port\",\n        default=mcp_to_blender_server.DEFAULT_PORT,\n        min=_PORT_MIN,\n        max=_PORT_MAX,\n    )\n    strongcode_config_path: StringProperty(  # type: ignore[valid-type]\n        name=\"StrongCode Private Config\",\n        default=\"\",\n        options={\"HIDDEN\"},\n    )\n"
+        },
+        {
+          "before": "        try:\n            mcp_to_blender_server.start(prefs.host, prefs.port)\n",
+          "after": "        try:\n            mcp_to_blender_server.configure_private_config(prefs.strongcode_config_path)\n            mcp_to_blender_server.start(prefs.host, prefs.port)\n"
+        },
+        {
+          "before": "    try:\n        mcp_to_blender_server.start(prefs.host, prefs.port)\n",
+          "after": "    try:\n        mcp_to_blender_server.configure_private_config(prefs.strongcode_config_path)\n        mcp_to_blender_server.start(prefs.host, prefs.port)\n"
+        },
+        {
+          "before": "    from .cli import cli_execute\n    return cli_execute(argv)\n",
+          "after": "    from .cli import cli_execute\n    prefs = bpy.context.preferences.addons[__package__].preferences\n    mcp_to_blender_server.configure_private_config(prefs.strongcode_config_path)\n    return cli_execute([*argv, \"--host\", prefs.host, \"--port\", str(prefs.port)])\n"
+        }
+      ]
+    }
+  ]
+}

@@ -17,6 +17,13 @@ describe("completed reasoning disclosure", () => {
     expect(stdout).toContain('"initialCollapsed":true');
     expect(stdout).toContain('"initialFinalAnswer":true');
     expect(stdout).toContain('"initialReasoningHidden":true');
+    expect(stdout).toContain('"reasoningPanelUsesBorderAndPanel":true');
+    expect(stdout).toContain('"initialIdleLabelMutedOnPanel":true');
+    expect(stdout).toContain('"hoveredCollapsedTextOnElement":true');
+    expect(stdout).toContain('"hoverDoesNotFocusOrToggle":true');
+    expect(stdout).toContain('"pointerExitRestoresIdle":true');
+    expect(stdout).toContain('"expandedBlurredPrimaryOnPanel":true');
+    expect(stdout).toContain('"finalAnswerOutsideReasoningPanel":true');
     expect(stdout).toContain('"mouseExpanded":true');
     expect(stdout).toContain('"mouseExpansionSanitized":true');
     expect(stdout).toContain('"mouseCollapsed":true');
@@ -42,5 +49,8 @@ describe("completed reasoning disclosure", () => {
     expect(stdout).toContain('"repeatedCommandCycles":true');
     expect(stdout).toContain('"escapeRestoresTextarea":true');
     expect(stdout).toContain('"distinctDisclosureIds":true');
+    expect(stdout).toContain('"mouseExpanded":true');
+    expect(stdout).toContain('"textareaFocusPreservedAfterMouse":true');
+    expect(stdout).toContain('"textareaTypedAfterMouse":true');
   });
 });

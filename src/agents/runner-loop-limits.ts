@@ -4,7 +4,7 @@ import { err, ok, type Result } from "../core/result";
 import type { ToolCall } from "../core/types";
 
 const DEFAULT_MAX_STEPS = 8;
-const DEFAULT_MAX_TOOL_CALLS = 4;
+const DEFAULT_MAX_TOOL_CALLS = 500;
 
 export type RunnerLoopLimitOptions = {
   readonly maxSteps?: number;

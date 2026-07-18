@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { rename, rm } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -8,16 +8,13 @@ import {
   pathState,
   removePath,
   statesEqual,
-  syncDirectory,
-  writeDurableFile
+  syncDirectory
 } from "./durable-fs";
 import {
   JOURNAL_PHASES,
-  type ActivationPhase,
   type BlenderInstallJournal,
   type BlenderInstallTarget,
   type JournalPhase,
-  type PathState,
   type TransactionFaultInjector
 } from "./journal-schema";
 import {
@@ -28,17 +25,14 @@ import {
   writeBlenderInstallJournal
 } from "./journal-store";
 import { acquireBlenderInstallLock, assertBlenderInstallLock, type BlenderInstallLock } from "./install-lock";
-import { protectPrivateFile, writePrivateFile } from "./private-files";
+import { protectPrivateFile } from "./private-files";
+import {
+  stageBlenderInstallTarget,
+  stagedBlenderInstallTargetPath,
+  type BlenderInstallTargetPlan
+} from "./transaction-stage";
 
-export type StagedTarget = { readonly kind: "file"; readonly content: string | Buffer } | { readonly kind: "directory"; readonly sourcePath: string };
-
-export type BlenderInstallTargetPlan = {
-  readonly canonicalPath: string;
-  readonly activationPhase: ActivationPhase;
-  readonly staged: StagedTarget;
-  readonly private?: boolean;
-  readonly requiredPreState: PathState;
-};
+export type { BlenderInstallTargetPlan, StagedTarget } from "./transaction-stage";
 
 export type CreateBlenderInstallJournalOptions = {
   readonly homePath: string;
@@ -49,50 +43,6 @@ export type CreateBlenderInstallJournalOptions = {
 };
 
 export type TransactionFaultOptions = { readonly fault?: TransactionFaultInjector };
-
-function targetId(canonicalPath: string): string {
-  return createHash("sha256").update(process.platform === "win32" ? canonicalPath.toLowerCase() : canonicalPath).digest("hex").slice(0, 16);
-}
-
-function stagedPath(journalPath: string, target: BlenderInstallTarget): string {
-  return path.join(layoutFromJournalPath(journalPath).stageDirectory, `${target.targetId}.${target.expectedPost.kind}`);
-}
-
-async function stageTarget(
-  stageDirectory: string,
-  plan: BlenderInstallTargetPlan
-): Promise<BlenderInstallTarget> {
-  const canonicalPath = await canonicalTargetPath(plan.canonicalPath);
-  const id = targetId(canonicalPath);
-  const privateFile = plan.private ?? false;
-  if (privateFile && plan.staged.kind === "directory") {
-    throw new BlenderInstallError("unsafe-path", "Private Blender targets must be regular files");
-  }
-  const destination = path.join(stageDirectory, `${id}.${plan.staged.kind}`);
-  if (plan.staged.kind === "file") {
-    if (privateFile) await writePrivateFile(destination, plan.staged.content);
-    else await writeDurableFile(destination, plan.staged.content, 0o600);
-  } else {
-    await copyPathDurable(plan.staged.sourcePath, destination);
-  }
-  const expectedPost = await pathState(destination);
-  const current = await pathState(canonicalPath);
-  if (current.kind !== "absent" && current.kind !== expectedPost.kind) {
-    throw new BlenderInstallError("conflict", `Refusing managed target path type change: ${canonicalPath}`);
-  }
-  return {
-    targetId: id,
-    canonicalPath,
-    activationPhase: plan.activationPhase,
-    private: privateFile,
-    status: "staged",
-    requiredPreState: plan.requiredPreState,
-    preState: null,
-    backup: null,
-    expectedPost,
-    conflict: null
-  };
-}
 
 export async function createBlenderInstallJournal(
   options: CreateBlenderInstallJournalOptions
@@ -107,7 +57,7 @@ export async function createBlenderInstallJournal(
   try {
     layout = await createTransactionLayout(options.homePath, options.profileId, transactionId);
     const targets: BlenderInstallTarget[] = [];
-    for (const plan of options.targets) targets.push(await stageTarget(layout.stageDirectory, plan));
+    for (const plan of options.targets) targets.push(await stageBlenderInstallTarget(layout.stageDirectory, plan));
     const targetPaths = targets.map(target => process.platform === "win32" ? target.canonicalPath.toLowerCase() : target.canonicalPath);
     if (new Set(targetPaths).size !== targets.length) {
       throw new BlenderInstallError("conflict", "Managed target paths must be unique within a transaction");
@@ -176,7 +126,7 @@ export async function snapshotBlenderInstallTargets(journalPath: string, options
     if (!statesEqual(current, target.requiredPreState)) {
       throw new BlenderInstallError("conflict", `Managed target changed after planning: ${target.canonicalPath}`);
     }
-    if (current.kind !== "absent" && current.kind !== target.expectedPost.kind) {
+    if (target.expectedPost.kind !== "absent" && current.kind !== "absent" && current.kind !== target.expectedPost.kind) {
       throw new BlenderInstallError("conflict", `Refusing managed target path type change: ${target.canonicalPath}`);
     }
     let backup = null;
@@ -199,11 +149,14 @@ export async function snapshotBlenderInstallTargets(journalPath: string, options
 }
 
 async function prepareAdjacentReplacement(journalPath: string, target: BlenderInstallTarget): Promise<string> {
+  if (target.expectedPost.kind === "absent") {
+    throw new BlenderInstallError("invalid-transition", `Absent target has no staged replacement: ${target.canonicalPath}`);
+  }
   const temporary = path.join(path.dirname(target.canonicalPath), `.${path.basename(target.canonicalPath)}.${target.targetId}.installing`);
   const existing = await pathState(temporary);
   if (statesEqual(existing, target.expectedPost)) await removePath(temporary);
   else if (existing.kind !== "absent") throw new BlenderInstallError("conflict", `Activation temporary path is unowned: ${temporary}`);
-  await copyPathDurable(stagedPath(journalPath, target), temporary, target.private);
+  await copyPathDurable(stagedBlenderInstallTargetPath(journalPath, target), temporary, target.private);
   if (target.private && target.expectedPost.kind === "file") await protectPrivateFile(temporary);
   return temporary;
 }
@@ -229,35 +182,43 @@ export async function activateBlenderInstallTarget(
   if (target.status !== "snapshotted" || !statesEqual(live, target.preState)) {
     throw new BlenderInstallError("conflict", `Managed target changed before activation: ${canonical}`);
   }
-  const staged = await pathState(stagedPath(journalPath, target));
+  const staged = await pathState(stagedBlenderInstallTargetPath(journalPath, target));
   if (!statesEqual(staged, target.expectedPost)) throw new BlenderInstallError("conflict", `Staged target hash mismatch: ${canonical}`);
   journal = { ...journal, updatedAt: new Date().toISOString(), targets: journal.targets.map(candidate =>
     candidate.targetId === target.targetId ? { ...candidate, status: "activating" as const } : candidate) };
   await writeBlenderInstallJournal(journalPath, journal);
   await options.fault?.("before-destructive-transition");
 
-  const temporary = await prepareAdjacentReplacement(journalPath, target);
+  const temporary = target.expectedPost.kind === "absent"
+    ? undefined
+    : await prepareAdjacentReplacement(journalPath, target);
   const displaced = path.join(path.dirname(canonical), `.${path.basename(canonical)}.${journal.transactionId}.displaced`);
   try {
     const latest = await pathState(canonical);
     if (!statesEqual(latest, target.preState)) {
       throw new BlenderInstallError("conflict", `Managed target changed immediately before activation: ${canonical}`);
     }
-    if (target.expectedPost.kind === "directory" && target.preState.kind === "directory") {
+    const requiresDisplacement = target.expectedPost.kind === "absent"
+      || (target.expectedPost.kind === "directory" && target.preState.kind === "directory");
+    if (requiresDisplacement) {
       if ((await pathState(displaced)).kind !== "absent") throw new BlenderInstallError("conflict", `Displaced target evidence already exists: ${displaced}`);
       await rename(canonical, displaced);
       await syncDirectory(path.dirname(canonical));
       await options.fault?.("after-target-displaced");
     }
-    await rename(temporary, canonical);
-    await syncDirectory(path.dirname(canonical));
+    if (temporary !== undefined) {
+      await rename(temporary, canonical);
+      await syncDirectory(path.dirname(canonical));
+    }
     await options.fault?.("after-target-activated");
     const displacedState = await pathState(displaced);
     if (target.preState.kind !== "absent" && statesEqual(displacedState, target.preState)) await removePath(displaced);
     else if (displacedState.kind !== "absent") throw new BlenderInstallError("conflict", `Displaced target evidence changed: ${displaced}`);
   } finally {
-    const temporaryState = await pathState(temporary);
-    if (statesEqual(temporaryState, target.expectedPost)) await removePath(temporary);
+    if (temporary !== undefined) {
+      const temporaryState = await pathState(temporary);
+      if (statesEqual(temporaryState, target.expectedPost)) await removePath(temporary);
+    }
   }
   journal = await readBlenderInstallJournal(journalPath);
   await writeBlenderInstallJournal(journalPath, { ...journal, updatedAt: new Date().toISOString(), targets: journal.targets.map(candidate =>

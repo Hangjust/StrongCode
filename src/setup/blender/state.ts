@@ -11,7 +11,8 @@ export async function mergeBlenderSetupResult(homePath: string, result: BlenderS
         const baseline = result.originalBlender;
         const baselineMatches = current === undefined || baseline === undefined
           ? current === baseline
-          : current.profileId === baseline.profileId
+          : current.flavor === baseline.flavor
+            && current.profileId === baseline.profileId
             && current.version === baseline.version
             && current.executablePath === baseline.executablePath
             && current.receiptPath === baseline.receiptPath

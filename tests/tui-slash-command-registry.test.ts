@@ -16,8 +16,8 @@ describe("slash command registry", () => {
     const canonicalCommands = slashCommandRegistry.map(command => command.canonical);
     const paletteRows = slashCommandPaletteRows.map(command => command.slash);
 
-    expect(canonicalCommands).toEqual(["connect", "agent", "start-work", "compact", "model", "summary", "help", "exit"]);
-    expect(paletteRows).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/model", "/models", "/summary", "/help", "/exit"]);
+    expect(canonicalCommands).toEqual(["connect", "agent", "start-work", "compact", "computer-use", "model", "summary", "help", "exit"]);
+    expect(paletteRows).toEqual(["/connect", "/agent", "/agents", "/start-work", "/compact", "/computer use", "/model", "/models", "/summary", "/help", "/exit"]);
     expect(createDefaultPalette().list()).toEqual(slashCommandPaletteRows);
     expect(slashCommandHelpRows.map(command => command.text)).toEqual([
       "  /model             Pick a model for the active agent",
@@ -28,6 +28,7 @@ describe("slash command registry", () => {
       "  /agent [name]      List or activate any agent",
       "  /start-work        Approve JBP plan → Bob The Builder",
       "  /compact           Compact active context",
+      "  /computer use [task] Enable computer use for one turn",
       "  /summary / F2     Tokens · cost · tools · MCPs",
       "  /exit              Exit StrongCode"
     ]);
@@ -89,6 +90,10 @@ describe("slash command registry", () => {
     expect(parseSlashCommand("/model GPT-5.5")).toEqual({ command: "model", action: "select", modelId: "GPT-5.5" });
     expect(parseSlashCommand("/help extra")).toEqual({ command: "unknown", input: "/help extra" });
     expect(parseSlashCommand("/models extra")).toEqual({ command: "unknown", input: "/models extra" });
+    expect(parseSlashCommand("/computer use")).toEqual({ command: "computer-use" });
+    expect(parseSlashCommand("/computer use open Calculator")).toEqual({ command: "computer-use" });
+    expect(parseSlashCommand("/computer")).toEqual({ command: "unknown", input: "/computer" });
+    expect(parseSlashCommand("/computer off")).toEqual({ command: "unknown", input: "/computer off" });
   });
 
   it("preserves unknown slash input for the caller", () => {
@@ -132,7 +137,7 @@ describe("slash command registry", () => {
 
   it("allows only read-only slash actions while a turn runs", () => {
     const allowed = ["/HELP", "/SUMMARY", "/EXIT", "/AGENT", "/AGENTS", "/MODEL", "/MODELS", "/CONNECT", "/unknown"];
-    const blocked = ["/agent next", "/agent Newton", "/start-work", "/model GPT-5.5", "/model Newton GPT-5.5", "/connect openai key"];
+    const blocked = ["/agent next", "/agent Newton", "/start-work", "/computer use", "/model GPT-5.5", "/model Newton GPT-5.5", "/connect openai key"];
 
     for (const input of allowed) {
       const parsed = parseSlashCommand(input);

@@ -6,7 +6,7 @@ import { mergeBlenderSetupResult } from "../src/setup/blender/state";
 import type { InstalledBlenderIntegration, SetupState } from "../src/setup/types";
 
 const initialState: SetupState = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   completed: false,
   selectedProviders: [],
   deepSeekConfigured: false,
@@ -17,6 +17,7 @@ const initialState: SetupState = {
 };
 
 const installedBlender: InstalledBlenderIntegration = {
+  flavor: "legacy",
   profileId: "blender-concurrent",
   version: "4.3.2",
   executablePath: path.resolve("fixtures", "blender.exe"),
@@ -29,10 +30,31 @@ async function tempHome(prefix: string): Promise<string> {
 }
 
 describe("setup state revisions", () => {
+  it("migrates schema-v2 Blender metadata to the legacy flavor", async () => {
+    // Given
+    const homePath = await tempHome("strongcode-state-v2-blender-flavor-");
+    const { flavor: _flavor, ...legacyBlender } = installedBlender;
+    await writeFile(path.join(homePath, "setup.json"), `${JSON.stringify({
+      ...initialState,
+      schemaVersion: 2,
+      blender: legacyBlender
+    })}\n`, "utf8");
+
+    // When
+    const state = await loadSetupState(homePath);
+
+    // Then
+    expect(state).toMatchObject({
+      schemaVersion: 3,
+      blender: { flavor: "legacy", profileId: installedBlender.profileId }
+    });
+  });
+
   it("defaults an existing schema-v2 state without an offer version to zero", async () => {
     const homePath = await tempHome("strongcode-state-v2-default-");
     await writeFile(path.join(homePath, "setup.json"), `${JSON.stringify({
       ...initialState,
+      schemaVersion: 2,
       blenderOfferVersion: undefined
     })}\n`, "utf8");
 
@@ -99,7 +121,7 @@ describe("setup state revisions", () => {
 
     await mergeBlenderSetupResult(homePath, { status: "not-found", state: initialState });
 
-    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(1);
+    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(2);
   });
 
   it("does not let a delayed install result overwrite newer Blender metadata", async () => {

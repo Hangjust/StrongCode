@@ -1,11 +1,13 @@
 import type { StrongCodeConfig } from "../config/schema";
+import type { BlenderIntegrationFlavor } from "./blender/selection";
 
-export const SETUP_SCHEMA_VERSION = 2 as const;
-export const BLENDER_OFFER_VERSION = 1 as const;
+export const SETUP_SCHEMA_VERSION = 3 as const;
+export const BLENDER_OFFER_VERSION = 2 as const;
 
 export type VoiceToTextChoice = "yes" | "no" | "maybe";
 
 export type InstalledBlenderIntegration = {
+  readonly flavor: BlenderIntegrationFlavor;
   readonly profileId: string;
   readonly version: string;
   readonly executablePath: string;

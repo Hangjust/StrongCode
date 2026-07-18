@@ -15,7 +15,8 @@ import { configuredProviderIds, disableProvidersExcept, globalConfigPath, loadSe
 import { discoverModelsForSetup, scanLocalProviders, SetupDiscoveredModel, SetupDiscoveryHttpError, SetupDiscoveryOptions } from "./discovery";
 import { TerminalSetupPrompter } from "./prompter";
 import { emptySetupState, loadSetupState, updateSetupState } from "./state";
-import { SetupCancelledError, SetupChoice, SetupPrompter, SetupResult, SetupState, VoiceToTextChoice } from "./types";
+import { BLENDER_OFFER_VERSION, SetupCancelledError, SetupChoice, SetupPrompter, SetupResult, SetupState,
+  VoiceToTextChoice } from "./types";
 import { applyVoiceToTextInstructions } from "./voice-instructions";
 import { setupBlenderIntegration, type BlenderSetupDependencies } from "./blender/setup";
 import { mergeBlenderSetupResult } from "./blender/state";
@@ -780,7 +781,7 @@ export async function runSetup(options: RunSetupOptions = {}, dependencies: Setu
     completed = true;
     const shouldOfferBlender = !state.completed
       && !completedState.blender
-      && (completedState.blenderOfferVersion ?? 0) < 1
+      && (completedState.blenderOfferVersion ?? 0) < BLENDER_OFFER_VERSION
       && (dependencies.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true));
     const finalState = shouldOfferBlender
       ? await mergeBlenderSetupResult(homePath, await setupBlenderIntegration({

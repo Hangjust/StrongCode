@@ -1,10 +1,14 @@
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { strongCodeConfigSchema } from "../src/config/schema";
 import { createRuntimeContext } from "../src/runtime/context";
 import { mcpConfigSchema } from "../src/mcp/config";
 import { createRuntimeToolRegistry } from "../src/mcp/runtime-registry";
+import { planBlenderPermissionsSource } from "../src/setup/blender/config-merge";
 import { AUDITED_READ_ONLY_TOOL_PATTERNS } from "../src/tools/defaults";
+import { getToolPermission } from "../src/tools/permissions";
 import type { ToolRegistry } from "../src/tools/registry";
 import type { Tool } from "../src/tools/tool";
 import { tempWorkspace, testConfig } from "./helpers";
@@ -62,6 +66,30 @@ afterEach(async () => {
 });
 
 describe("MCP startup security", () => {
+  it("keeps every official Blender MCP tool at ask while preserving a managed deny", () => {
+    // Given
+    const config = testConfig(process.cwd());
+    const source = YAML.stringify(config);
+    const launch = {
+      flavor: "official",
+      pythonPath: path.resolve("private", "python"),
+      launcherPath: path.resolve("private", "official-blender-mcp.py"),
+      privateConfigPath: path.resolve("private", "official.json")
+    } as const;
+
+    // When
+    const planned = planBlenderPermissionsSource(source, launch);
+    const parsed = strongCodeConfigSchema.parse(YAML.parse(planned.content));
+    const arbitrary = getToolPermission(parsed, "mcp__blender__render_scene");
+    const execute = getToolPermission(parsed, "mcp__blender__execute_blender_code");
+    parsed.permissions.tools["mcp__blender__render_scene"] = "deny";
+
+    // Then
+    expect(arbitrary).toBe("ask");
+    expect(execute).toBe("ask");
+    expect(getToolPermission(parsed, "mcp__blender__render_scene")).toBe("deny");
+  });
+
   it("classifies MCP discovery as spawning rather than audited read-only work", async () => {
     // Given
     const workspace = await trackedWorkspace();

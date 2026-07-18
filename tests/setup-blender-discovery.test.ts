@@ -34,7 +34,8 @@ function blenderOutput(version: string, root: string): string {
       user: path.join(root, "user")
     },
     configPath: path.join(root, "config"),
-    scriptsPaths: [path.join(root, "scripts")]
+    scriptsPaths: [path.join(root, "scripts")],
+    extensionsPath: path.join(root, "extensions")
   })}\n`;
 }
 

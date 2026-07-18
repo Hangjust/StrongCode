@@ -33,7 +33,7 @@ class WorkflowPrompter implements SetupPrompter {
 }
 
 const coreState: SetupState = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   completed: true,
   completedAt: "2026-07-09T12:00:00.000Z",
   selectedProviders: [],
@@ -92,7 +92,7 @@ function dependencies(
       installs.push(options);
       return {
         status: "installed",
-        profileId: options.profile.profileId,
+        profileId: options.selection.profile.profileId,
         receiptPath: path.resolve("home", "mcps", "blender", "installation.json")
       };
     }
@@ -115,7 +115,11 @@ describe("Blender setup workflow", () => {
     }, dependencies(discovery([candidate]), installs));
 
     expect(installs).toHaveLength(1);
-    expect(installs[0]).toMatchObject({ profile: candidate, platform: "win32", architecture: "x64" });
+    expect(installs[0]).toMatchObject({
+      selection: { flavor: "legacy", profile: candidate },
+      platform: "win32",
+      architecture: "x64"
+    });
     expect(prompter.confirmDefaults).toEqual([false]);
     expect(prompter.output.join("\n")).toContain("blender-mcp 1.6.4");
     expect(prompter.output.join("\n")).toContain("authenticated ephemeral loopback listener");
@@ -123,6 +127,7 @@ describe("Blender setup workflow", () => {
     expect(prompter.output.join("\n")).toContain("does not install Python or uv, create OS autostart, or modify project configuration");
     expect(prompter.output.join("\n")).toContain("rollback");
     expect(result.state.blender).toMatchObject({
+      flavor: "legacy",
       profileId: candidate.profileId,
       version: candidate.version,
       executablePath: candidate.executable.canonicalPath,
@@ -139,6 +144,7 @@ describe("Blender setup workflow", () => {
     const installedState = {
       ...coreState,
       blender: {
+        flavor: "legacy",
         profileId: candidate.profileId,
         version: candidate.version,
         executablePath: candidate.executable.canonicalPath,
@@ -309,7 +315,7 @@ describe("Blender setup workflow", () => {
     }, dependencies(discovery([first, second]), installs));
 
     expect(prompter.selectCalls).toHaveLength(1);
-    expect(installs[0]?.profile.profileId).toBe(second.profileId);
+    expect(installs[0]?.selection.profile.profileId).toBe(second.profileId);
   });
 
   it("shows the actionable Python prerequisite and does not prompt or install", async () => {
@@ -353,6 +359,7 @@ describe("Blender setup workflow", () => {
     const installedState = {
       ...coreState,
       blender: {
+        flavor: "legacy",
         profileId: "installed",
         version: "4.3.2",
         executablePath: path.resolve("blender.exe"),
@@ -387,6 +394,7 @@ describe("Blender setup workflow", () => {
     const installedState = {
       ...coreState,
       blender: {
+        flavor: "legacy",
         profileId: candidate.profileId,
         version: candidate.version,
         executablePath: candidate.executable.canonicalPath,
@@ -416,7 +424,7 @@ describe("Blender setup workflow", () => {
     expect(prompter.confirmDefaults).toEqual([]);
   });
 
-  it("restores missing metadata from the verified profile and receipt with the injected clock", async () => {
+  it("automatically restores missing metadata only after verifying the committed receipt", async () => {
     // Given
     const homePath = await mkdtemp(path.join(tmpdir(), "strongcode-workflow-missing-metadata-"));
     const receiptPath = path.join(homePath, "mcps", "blender", "installation.json");
@@ -424,6 +432,7 @@ describe("Blender setup workflow", () => {
     await writeFile(receiptPath, "owned receipt fixture", "utf8");
     const prompter = new WorkflowPrompter();
     const candidate = profile("verified-profile", "4.4.0");
+    const verificationIntents: boolean[] = [];
 
     // When
     const result = await setupBlenderIntegration({
@@ -431,20 +440,25 @@ describe("Blender setup workflow", () => {
       workspace: process.cwd(),
       state: coreState,
       prompter,
-      mode: "explicit"
+      mode: "automatic"
     }, {
       ...dependencies(discovery([candidate]), []),
-      install: async () => ({ status: "already-installed", profileId: candidate.profileId, receiptPath })
+      install: async options => {
+        verificationIntents.push(options.verifyOnly ?? false);
+        return { status: "already-installed", profileId: candidate.profileId, receiptPath };
+      }
     });
 
     // Then
     expect(result.state.blender).toEqual({
+      flavor: "legacy",
       profileId: candidate.profileId,
       version: candidate.version,
       executablePath: candidate.executable.canonicalPath,
       receiptPath,
       installedAt: "2026-07-10T10:00:00.000Z"
     });
+    expect(verificationIntents).toEqual([true]);
     expect(prompter.confirmDefaults).toEqual([]);
   });
 
@@ -456,12 +470,14 @@ describe("Blender setup workflow", () => {
       const candidate = profile("verified-profile", "4.4.0");
       const receiptPath = path.resolve("verified-installation.json");
       const verifiedIdentity = {
+        flavor: "legacy" as const,
         profileId: candidate.profileId,
         version: candidate.version,
         executablePath: candidate.executable.canonicalPath,
         receiptPath
       };
       const mismatches = {
+        flavor: "official" as const,
         profileId: "stale-profile",
         version: "4.3.2",
         executablePath: path.resolve("stale-blender.exe"),
@@ -502,6 +518,7 @@ describe("Blender setup workflow", () => {
     const installedState = {
       ...coreState,
       blender: {
+        flavor: "legacy",
         profileId: candidate.profileId,
         version: candidate.version,
         executablePath: candidate.executable.canonicalPath,
@@ -535,6 +552,7 @@ describe("Blender setup workflow", () => {
     const installedState = {
       ...coreState,
       blender: {
+        flavor: "legacy",
         profileId: candidate.profileId,
         version: candidate.version,
         executablePath: candidate.executable.canonicalPath,

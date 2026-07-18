@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as core from "@opentui/core";
-import { createTestRenderer } from "@opentui/core/testing";
+import { createTestRenderer, MouseButtons } from "@opentui/core/testing";
 
 function key(name: string, ctrl = false): InstanceType<typeof core.KeyEvent> {
   return new core.KeyEvent({
@@ -12,7 +12,7 @@ function key(name: string, ctrl = false): InstanceType<typeof core.KeyEvent> {
     meta: false,
     shift: false,
     option: false,
-    sequence: name === "return" ? "\r" : "",
+    sequence: name === "return" ? "\r" : name.length === 1 ? name : "",
     number: false,
     raw: "",
     eventType: "press",
@@ -128,6 +128,18 @@ permissions:
     const sessionTextarea = setup.renderer.currentFocusedRenderable;
     if (!(sessionTextarea instanceof core.TextareaRenderable)) throw new Error("Session textarea is not focused after the first response");
 
+    const firstHeader = disclosureHeaders(setup.renderer.root)[0];
+    if (!firstHeader) throw new Error("Expected the first completed reasoning disclosure");
+    const firstHeaderX = firstHeader.x === 0 ? firstHeader.screenX : firstHeader.x;
+    const firstHeaderY = firstHeader.y === 0 ? firstHeader.screenY : firstHeader.y;
+    await setup.mockMouse.click(firstHeaderX + 1, firstHeaderY, MouseButtons.LEFT);
+    await setup.flush();
+    const mouseExpanded = setup.captureCharFrame().includes("[-] Reasoning") && setup.captureCharFrame().includes("Private reasoning one.");
+    const textareaFocusPreservedAfterMouse = setup.renderer.currentFocusedRenderable === sessionTextarea;
+    setup.renderer.keyInput.emit("keypress", key("x"));
+    await setup.flush();
+    const textareaTypedAfterMouse = sessionTextarea.plainText === "x";
+
     setup.renderer.keyInput.emit("keypress", key("r", true));
     await setup.flush();
     const firstDisclosure = setup.renderer.currentFocusedRenderable;
@@ -157,7 +169,10 @@ permissions:
       newestFocused,
       repeatedCommandCycles,
       escapeRestoresTextarea: setup.renderer.currentFocusedRenderable === sessionTextarea,
-      distinctDisclosureIds: new Set(headers.map(header => header.id)).size === headers.length
+      distinctDisclosureIds: new Set(headers.map(header => header.id)).size === headers.length,
+      mouseExpanded,
+      textareaFocusPreservedAfterMouse,
+      textareaTypedAfterMouse
     }) + "\n");
     setup.renderer.destroy();
     await running;

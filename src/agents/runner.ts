@@ -18,6 +18,12 @@ import { runnerInterruption } from "./runner-outcome";
 import { modelToolDefinition } from "./runner-tool-batch";
 import { SessionOperationCoordinator } from "./session-operation-coordinator";
 import {
+  computerUseEnabled,
+  computerUseRequested,
+  isOpenComputerUseTool,
+  withComputerUseEnabled
+} from "../tools/computer-use-policy";
+import {
   runPrimaryPreflight,
   type PrimaryPreflightScheduler
 } from "./preflight/runner-gate";
@@ -205,21 +211,29 @@ export class AgentRunner {
     if (interruptedAfterUser) return interruptedAfterUser;
 
     const runtimeRole = agent.runtimeRole ?? "primary";
+    const directUserRequest = runtimeRole === "primary"
+      && this.context.taskId === undefined
+      && computerUseRequested(prompt);
+    const turnContext = directUserRequest
+      ? withComputerUseEnabled(this.context)
+      : this.context;
     const resolvedTools = this.tools.resolve(agent.config.tools);
     const policyTools = filterToolsForAgentPolicy(agent.toolPolicy, resolvedTools);
-    const runtimeTools = filterToolsForRuntimeRole(runtimeRole, policyTools);
+    const runtimeTools = filterToolsForRuntimeRole(runtimeRole, policyTools).filter(tool => (
+      computerUseEnabled(turnContext) || !isOpenComputerUseTool(tool.name)
+    ));
     const enabledTools = runtimeTools.filter(tool => (
-      assertChildToolAllowed(this.context, tool).ok
-      && assertToolAllowed(this.context.config, tool.name, this.context.effectivePermissions).ok
+      assertChildToolAllowed(turnContext, tool).ok
+      && assertToolAllowed(turnContext.config, tool.name, turnContext.effectivePermissions).ok
     ));
     const enabledToolNames = enabledTools.map(tool => tool.name);
-    const toolsByName = new Map(resolvedTools.map(tool => [tool.name, tool]));
+    const toolsByName = new Map(runtimeTools.map(tool => [tool.name, tool]));
     const toolDefinitions = enabledTools.map(modelToolDefinition);
     return runModelToolLoop({
       agent,
       prompt,
       sessionId,
-      context: this.context,
+      context: turnContext,
       sessions: this.sessions,
       emit: this.emit,
       limits: this.limits,

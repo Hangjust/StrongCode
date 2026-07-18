@@ -25,6 +25,7 @@ export interface ToolInvocationContext extends RuntimeContext {
   readonly taskId?: string;
   readonly effectivePermissions?: Readonly<Record<string, EffectiveToolPermission>>;
   readonly ownership?: readonly string[];
+  readonly computerUse?: "explicit-user-request";
 }
 
 export function createRuntimeContext(

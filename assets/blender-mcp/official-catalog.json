@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://projects.blender.org/lab/blender_mcp",
+    "commit": "03004fd0216bfe5e0a3d9ac9b47d5efadc3d78c4",
+    "tag": "v1.0.0",
+    "version": "1.0.0",
+    "addonId": "mcp",
+    "license": "GPL-3.0-or-later"
+  },
+  "release": {
+    "version": "1.0.0",
+    "tag": "v1.0.0",
+    "assets": [
+      {
+        "kind": "addon",
+        "addonId": "mcp",
+        "filename": "mcp-1.0.0.zip",
+        "url": "https://projects.blender.org/lab/blender_mcp/releases/download/v1.0.0/mcp-1.0.0.zip",
+        "size": 16765,
+        "sha256": "838c3449f01015c861290658ae67f122f0846f7882f60a5dfda0ef7e6a9b8403"
+      },
+      {
+        "kind": "mcpb",
+        "filename": "blender-1.0.0.mcpb",
+        "url": "https://projects.blender.org/lab/blender_mcp/releases/download/v1.0.0/blender-1.0.0.mcpb",
+        "size": 5553447,
+        "sha256": "93b070b1df82f57b1e7678b88b6bae28d06f105cd23ff6a4e0cc5f538bee2450"
+      }
+    ]
+  },
+  "root": {
+    "name": "blender-mcp",
+    "version": "1.0.0",
+    "source": "verified-mcpb",
+    "artifact": "blender-1.0.0.mcpb"
+  },
+  "lockSource": {
+    "artifact": "blender-1.0.0.mcpb",
+    "path": "uv.lock",
+    "size": 162146,
+    "sha256": "f6859224cf648af55274f309c56141bbbca089e04601290e0ac9891c44aad470"
+  },
+  "integrity": {
+    "authority": "StrongCode",
+    "upstreamSignatures": false,
+    "notice": "These are StrongCode-maintained SHA-256 pins, not upstream signatures."
+  },
+  "license": {
+    "path": "OFFICIAL_LICENSE.md",
+    "spdx": "GPL-3.0-or-later",
+    "sha256": "7cb42d823d6cca1203e8189556185536383aa0c2fc3129e1be2eec2a625320cb"
+  }
+}

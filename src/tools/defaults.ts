@@ -19,6 +19,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "mcp__semble__*",
   "mcp__playwright__*",
   "mcp__chrome_devtools__*",
+  "mcp__open_computer_use__*",
   "mcp__github__*",
   "mcp__exa__*",
   "mcp__tinyfish__*",

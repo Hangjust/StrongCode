@@ -149,3 +149,4 @@ export { BLENDER_OFFER_VERSION } from "./setup/types";
 export type { RunSetupOptions, SetupWizardDependencies } from "./setup/wizard";
 export type { InstalledBlenderIntegration, SetupResult, SetupState, VoiceToTextChoice } from "./setup/types";
 export type { BlenderSetupDependencies, BlenderSetupOptions, BlenderSetupResult } from "./setup/blender/setup";
+export type { BlenderIntegrationFlavor, BlenderIntegrationSelection } from "./setup/blender/selection";

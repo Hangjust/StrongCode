@@ -21,7 +21,7 @@ class OfferPrompter implements SetupPrompter {
 }
 
 const completedState: SetupState = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   completed: true,
   completedAt: "2026-07-15T09:00:00.000Z",
   selectedProviders: ["openai"],
@@ -114,14 +114,14 @@ describe("automatic Blender launch offer", () => {
     expect(providerSetups).toBe(0);
     expect(discoveries).toBe(1);
     const state = await loadSetupState(homePath);
-    expect(state.blenderOfferVersion).toBe(1);
+    expect(state.blenderOfferVersion).toBe(2);
     expect(state.blender).toBeUndefined();
     expect(prompter.closes).toBe(1);
   });
 
   it("suppresses repeat offers after decline", async () => {
     const homePath = await tempHome("strongcode-launch-declined-");
-    await saveSetupState(homePath, { ...completedState, blenderOfferVersion: 1 });
+    await saveSetupState(homePath, { ...completedState, blenderOfferVersion: 2 });
     const prompter = new OfferPrompter();
     let discoveries = 0;
 
@@ -137,6 +137,29 @@ describe("automatic Blender launch offer", () => {
 
     expect(discoveries).toBe(0);
     expect(prompter.closes).toBe(0);
+  });
+
+  it("reoffers Blender when only the previous offer version was declined", async () => {
+    // Given
+    const homePath = await tempHome("strongcode-launch-old-decline-");
+    await saveSetupState(homePath, { ...completedState, blenderOfferVersion: 1 });
+    const prompter = new OfferPrompter();
+    prompter.confirmations.push(false);
+    let discoveries = 0;
+
+    // When
+    await main(["node", "strongcode"], { ...launchDependencies(homePath, prompter), blender: {
+      platform: "win32",
+      architecture: "x64",
+      discover: async () => {
+        discoveries += 1;
+        return availableBlender();
+      }
+    } });
+
+    // Then
+    expect(discoveries).toBe(1);
+    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(2);
   });
 
   it("retries detection on a later launch after Blender was not found", async () => {
@@ -172,7 +195,7 @@ describe("automatic Blender launch offer", () => {
     });
 
     expect(discoveries).toBe(2);
-    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(1);
+    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(2);
   });
 
   it("keeps missing prerequisites eligible for a future launch", async () => {
@@ -203,7 +226,7 @@ describe("automatic Blender launch offer", () => {
       }
     });
 
-    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(1);
+    expect((await loadSetupState(homePath)).blenderOfferVersion).toBe(2);
   });
 
   it("merges successful Blender metadata without changing completed provider fields", async () => {
@@ -221,7 +244,7 @@ describe("automatic Blender launch offer", () => {
         discover: async () => availableBlender(),
         install: async options => ({
           status: "installed",
-          profileId: options.profile.profileId,
+          profileId: options.selection.profile.profileId,
           receiptPath: path.join(homePath, "mcps", "blender", "installation.json")
         })
       }
@@ -230,7 +253,7 @@ describe("automatic Blender launch offer", () => {
     expect(await loadSetupState(homePath)).toMatchObject({
       completed: true,
       selectedProviders: ["openai"],
-      blenderOfferVersion: 1,
+      blenderOfferVersion: 2,
       blender: { profileId: blenderProfile.profileId }
     });
   });

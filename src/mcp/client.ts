@@ -7,9 +7,13 @@ import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
 import { StrongCodeError } from "../core/errors";
-import type { EffectiveToolPermission, RuntimeContext } from "../runtime/context";
+import type { RuntimeContext, ToolInvocationContext } from "../runtime/context";
 import { resolveWorkspaceRealPath } from "../tools/builtin/list-files";
 import { assertToolAllowed } from "../tools/permissions";
+import {
+  assertComputerUseEnabled,
+  OPEN_COMPUTER_USE_SERVER_ID
+} from "../tools/computer-use-policy";
 import type { McpConfig, McpServerConfig } from "./config";
 import { namespacedMcpToolPattern } from "./names";
 import { createOAuthCallbackServer, PersistentOAuthProvider } from "./oauth";
@@ -24,6 +28,11 @@ export interface ConnectedMcpServer {
 
 function isLocal(config: McpServerConfig): config is Extract<McpServerConfig, { type: "local" | "stdio" }> {
   return config.type === "local" || config.type === "stdio";
+}
+
+function isOpenComputerUseServer(serverId: string, server: McpServerConfig): boolean {
+  return serverId === OPEN_COMPUTER_USE_SERVER_ID
+    || (isLocal(server) && server.command.some(argument => /^open-computer-use(?:@|$)/i.test(argument)));
 }
 
 export function selectedMcpEnvironment(
@@ -102,12 +111,16 @@ export class McpManager {
 
   async connect(
     serverId: string,
-    effectivePermissions?: Readonly<Record<string, EffectiveToolPermission>>
+    invocationContext: ToolInvocationContext = this.context
   ): Promise<ConnectedMcpServer> {
     const server = this.config.mcpServers[serverId];
     if (!server || !server.enabled) throw new StrongCodeError("TOOL_ERROR", `MCP server '${serverId}' is not enabled`);
+    if (isOpenComputerUseServer(serverId, server)) {
+      const computerUseAllowed = assertComputerUseEnabled(invocationContext);
+      if (!computerUseAllowed.ok) throw computerUseAllowed.error;
+    }
     if (isLocal(server)) {
-      const allowed = assertToolAllowed(this.context.config, namespacedMcpToolPattern(serverId), effectivePermissions);
+      const allowed = assertToolAllowed(invocationContext.config, namespacedMcpToolPattern(serverId), invocationContext.effectivePermissions);
       if (!allowed.ok) throw allowed.error;
     }
     const existing = this.connections.get(serverId);
@@ -200,18 +213,18 @@ export class McpManager {
 
   async listTools(
     serverId: string,
-    effectivePermissions?: Readonly<Record<string, EffectiveToolPermission>>
+    invocationContext: ToolInvocationContext = this.context
   ): Promise<SdkTool[]> {
-    return (await this.connect(serverId, effectivePermissions)).tools;
+    return (await this.connect(serverId, invocationContext)).tools;
   }
 
   async callTool(
     serverId: string,
     toolName: string,
     args: Record<string, unknown>,
-    effectivePermissions?: Readonly<Record<string, EffectiveToolPermission>>
+    invocationContext: ToolInvocationContext = this.context
   ): Promise<string> {
-    const connection = await this.connect(serverId, effectivePermissions);
+    const connection = await this.connect(serverId, invocationContext);
     if (!connection.tools.some(tool => tool.name === toolName)) {
       throw new StrongCodeError("TOOL_ERROR", `MCP server '${serverId}' does not expose tool '${toolName}'`);
     }
@@ -226,9 +239,9 @@ export class McpManager {
 
   async autoStart(): Promise<ConnectedMcpServer[]> {
     const ids = Object.entries(this.config.mcpServers)
-      .filter(([, server]) => server.enabled && (server.autoStart ?? this.config.defaults.autoStart))
+      .filter(([id, server]) => !isOpenComputerUseServer(id, server) && server.enabled && (server.autoStart ?? this.config.defaults.autoStart))
       .map(([id]) => id);
-    const results = await Promise.allSettled(ids.map(id => this.connect(id)));
+    const results = await Promise.allSettled(ids.map(id => this.connect(id, this.context)));
     return results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
   }
 

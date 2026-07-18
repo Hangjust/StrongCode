@@ -28,6 +28,14 @@ export class StrongCodeError extends Error {
   }
 }
 
+/** A provider diagnostic that has been redacted and is safe to show to the user. */
+export class PublicProviderError extends StrongCodeError {
+  constructor(message: string) {
+    super("MODEL_ERROR", message);
+    this.name = "PublicProviderError";
+  }
+}
+
 export function toStrongCodeError(error: unknown, code: StrongCodeErrorCode): StrongCodeError {
   if (error instanceof StrongCodeError) {
     return error;

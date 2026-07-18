@@ -6,6 +6,17 @@ const execFileAsync = promisify(execFile);
 const mouseIt = spawnSync("bun", ["--version"], { stdio: "ignore" }).status === 0 ? it : it.skip;
 
 describe("slash command navigation", () => {
+  mouseIt("notifies slash overlay synchronization only for textarea edits", async () => {
+    // Given: a prompt whose content callback synchronizes the slash-command overlay.
+    const fixture = path.resolve(__dirname, "fixtures", "prompt-content-change.ts");
+
+    // When: its deferred mount layout, one real edit, and a resize layout complete.
+    const { stdout } = await execFileAsync("bun", [fixture], { cwd: path.resolve(__dirname, "..") });
+
+    // Then: only the real textarea edit invokes the callback.
+    expect(stdout.trim()).toBe('{"mount":0,"afterEdit":1,"afterResize":1}');
+  });
+
   mouseIt("makes slash rows hoverable and clickable with the mouse", async () => {
     const fixture = path.resolve(__dirname, "fixtures", "slash-mouse.ts");
     const { stdout } = await execFileAsync("bun", [fixture], { cwd: path.resolve(__dirname, "..") });

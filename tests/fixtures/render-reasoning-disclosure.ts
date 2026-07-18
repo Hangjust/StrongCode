@@ -35,6 +35,10 @@ function isColor(label: core.TextRenderable, color: string): boolean {
   return label.fg.equals(core.RGBA.fromHex(color));
 }
 
+function isPanelColor(panel: core.BoxRenderable, color: string): boolean {
+  return panel.backgroundColor.equals(core.RGBA.fromHex(color));
+}
+
 async function main(): Promise<void> {
   const setup = await createTestRenderer({ width: 72, height: 16, exitOnCtrlC: false, useMouse: true, enableMouseMovement: true });
   const state = {
@@ -49,7 +53,7 @@ async function main(): Promise<void> {
   setup.renderer.root.add(scroll);
 
   try {
-    appendMessage(
+    const firstMessage = appendMessage(
       core,
       setup.renderer,
       scroll,
@@ -67,6 +71,18 @@ async function main(): Promise<void> {
     const firstHeader = headers[0];
     if (!firstHeader) throw new Error("Missing reasoning disclosure header");
     const firstLabel = labelFor(firstHeader);
+    const reasoningPanel = firstHeader.parent;
+    if (!(reasoningPanel instanceof core.BoxRenderable)) throw new Error("Missing reasoning disclosure panel");
+    const finalAnswer = firstMessage.getChildren().find(child => child instanceof core.TextRenderable && child.plainText === "Final answer stays visible.");
+    const reasoningPanelUsesBorderAndPanel = Array.isArray(reasoningPanel.border)
+      && reasoningPanel.border.length === 1
+      && reasoningPanel.border[0] === "left"
+      && reasoningPanel.borderColor.equals(core.RGBA.fromHex("#5c4d40"))
+      && isPanelColor(reasoningPanel, "#171411");
+    const initialIdleLabelMutedOnPanel = isColor(firstLabel, "#9a9184")
+      && isPanelColor(firstHeader, "#171411")
+      && firstLabel.bg.equals(core.RGBA.fromHex("#171411"));
+    const finalAnswerOutsideReasoningPanel = finalAnswer?.parent === firstMessage;
 
     firstHeader.focus();
     setup.renderer.focusRenderable(firstHeader);
@@ -80,13 +96,26 @@ async function main(): Promise<void> {
     await setup.flush();
     const collapsedBlurredMuted = isColor(firstLabel, "#9a9184");
 
+    const headerX = firstHeader.x === 0 ? firstHeader.screenX : firstHeader.x;
+    const headerY = firstHeader.y === 0 ? firstHeader.screenY : firstHeader.y;
+    await setup.mockMouse.moveTo(headerX + 1, headerY);
+    await setup.flush();
+    const hoveredCollapsedTextOnElement = isColor(firstLabel, "#f2eee6")
+      && isPanelColor(firstHeader, "#221d19")
+      && firstLabel.bg.equals(core.RGBA.fromHex("#221d19"));
+    const hoverDoesNotFocusOrToggle = setup.renderer.currentFocusedRenderable === otherControl
+      && !setup.captureCharFrame().includes("Private reasoning");
+    await setup.mockMouse.moveTo(setup.renderer.width - 1, setup.renderer.height - 1);
+    await setup.flush();
+    const pointerExitRestoresIdle = isColor(firstLabel, "#9a9184")
+      && isPanelColor(firstHeader, "#171411")
+      && firstLabel.bg.equals(core.RGBA.fromHex("#171411"));
+
     setup.renderer.keyInput.emit("keypress", key("return"));
     setup.renderer.keyInput.emit("keypress", key("space"));
     await setup.flush();
     const unfocusedKeyboardIgnored = !setup.captureCharFrame().includes("Private reasoning");
 
-    const headerX = firstHeader.x === 0 ? firstHeader.screenX : firstHeader.x;
-    const headerY = firstHeader.y === 0 ? firstHeader.screenY : firstHeader.y;
     await setup.mockMouse.click(headerX + 1, headerY, MouseButtons.LEFT);
     await setup.flush();
     const expandedByMouse = setup.captureCharFrame();
@@ -101,6 +130,15 @@ async function main(): Promise<void> {
     await setup.flush();
     const expandedByEnter = setup.captureCharFrame();
 
+    otherControl.focus();
+    setup.renderer.focusRenderable(otherControl);
+    await setup.flush();
+    const expandedBlurredPrimaryOnPanel = isColor(firstLabel, "#ffb870")
+      && isPanelColor(firstHeader, "#171411")
+      && firstLabel.bg.equals(core.RGBA.fromHex("#171411"));
+
+    firstHeader.focus();
+    setup.renderer.focusRenderable(firstHeader);
     setup.renderer.keyInput.emit("keypress", key("space"));
     await setup.flush();
     const collapsedBySpace = setup.captureCharFrame();
@@ -132,6 +170,13 @@ async function main(): Promise<void> {
       initialCollapsed: initial.includes("[+] Reasoning"),
       initialFinalAnswer: initial.includes("Final answer stays visible."),
       initialReasoningHidden: !initial.includes("Private reasoning") && !initial.includes("second line"),
+      reasoningPanelUsesBorderAndPanel,
+      initialIdleLabelMutedOnPanel,
+      hoveredCollapsedTextOnElement,
+      hoverDoesNotFocusOrToggle,
+      pointerExitRestoresIdle,
+      expandedBlurredPrimaryOnPanel,
+      finalAnswerOutsideReasoningPanel,
       disclosureIdsAreUnique: new Set(allHeaders.map(header => header.id)).size === allHeaders.length,
       disclosureIdsUsePrefix: allHeaders.every(header => header.id.startsWith("assistant-reasoning-disclosure-")),
       collapsedBlurredMuted: secondCollapsedBlurredMuted && collapsedBlurredMuted,

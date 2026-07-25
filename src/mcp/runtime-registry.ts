@@ -42,18 +42,30 @@ function errorResult(error: unknown) {
 }
 
 function gatewayTools(manager: McpManager): Tool[] {
-  const ids = manager.serverIds();
   return [
     {
       name: "mcp_list_tools",
-      description: `Discover tools exposed by one configured MCP server. Configured servers: ${ids.join(", ") || "none"}.`,
+      description: "Discover tools exposed by one configured MCP server.",
       effect: "discovery",
       inputSchema: listInputSchema,
       inputJsonSchema: {
         type: "object",
-        properties: { server: { type: "string", enum: ids } },
+        properties: { server: { type: "string" } },
         required: ["server"],
         additionalProperties: false
+      },
+      modelView(context) {
+        const serverIds = Object.freeze([...manager.serverIds(context)]);
+        if (serverIds.length === 0) return undefined;
+        return {
+          description: `Discover tools exposed by one configured MCP server. Configured servers: ${serverIds.join(", ")}.`,
+          inputJsonSchema: {
+            type: "object",
+            properties: { server: { type: "string", enum: serverIds } },
+            required: ["server"],
+            additionalProperties: false
+          }
+        };
       },
       readOnly: false,
       async execute(input, context) {
@@ -75,12 +87,29 @@ function gatewayTools(manager: McpManager): Tool[] {
       inputJsonSchema: {
         type: "object",
         properties: {
-          server: { type: "string", enum: ids },
+          server: { type: "string" },
           tool: { type: "string", minLength: 1 },
           arguments: { type: "object", additionalProperties: true }
         },
         required: ["server", "tool"],
         additionalProperties: false
+      },
+      modelView(context) {
+        const serverIds = Object.freeze([...manager.serverIds(context)]);
+        if (serverIds.length === 0) return undefined;
+        return {
+          description: `Call a tool on an enabled MCP server. Configured servers: ${serverIds.join(", ")}. Use mcp_list_tools first to discover the exact tool name and purpose.`,
+          inputJsonSchema: {
+            type: "object",
+            properties: {
+              server: { type: "string", enum: serverIds },
+              tool: { type: "string", minLength: 1 },
+              arguments: { type: "object", additionalProperties: true }
+            },
+            required: ["server", "tool"],
+            additionalProperties: false
+          }
+        };
       },
       readOnly: false,
       async execute(input, context) {

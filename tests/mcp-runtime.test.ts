@@ -8,6 +8,7 @@ import { createRuntimeToolRegistry } from "../src/mcp/runtime-registry";
 import { createOAuthCallbackServer } from "../src/mcp/oauth";
 import { DEFAULT_AGENT_TOOLS, DEFAULT_TOOL_PERMISSIONS } from "../src/tools/defaults";
 import { namespacedMcpToolName } from "../src/mcp/names";
+import { withComputerUseEnabled } from "../src/tools/computer-use-policy";
 import { tempWorkspace } from "./helpers";
 
 const roots = new Set<string>();
@@ -179,6 +180,46 @@ describe("MCP runtime", () => {
     }
   });
 
+  it("keeps unknown and disabled safe MCP targets as tool errors", async () => {
+    // Given
+    const workspace = await trackedWorkspace();
+    workspace.config.permissions.tools["mcp__unknown_safe__*"] = "allow";
+    workspace.config.permissions.tools["mcp__disabled_safe__*"] = "allow";
+    await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
+      version: 1,
+      mcpServers: {
+        disabled_safe: {
+          enabled: false,
+          autoStart: false,
+          type: "local",
+          command: ["strongcode-command-that-must-not-run"]
+        }
+      }
+    }), "utf8");
+    const registry = await createRuntimeToolRegistry(workspace.context);
+
+    try {
+      const listGateway = registry.get("mcp_list_tools");
+      const callGateway = registry.get("mcp_call");
+      if (!listGateway || !callGateway) throw new Error("MCP gateway tools were not registered");
+
+      // When
+      const results = await Promise.all([
+        listGateway.execute({ server: "unknown_safe" }, workspace.context),
+        callGateway.execute({ server: "unknown_safe", tool: "echo", arguments: {} }, workspace.context),
+        listGateway.execute({ server: "disabled_safe" }, workspace.context),
+        callGateway.execute({ server: "disabled_safe", tool: "echo", arguments: {} }, workspace.context)
+      ]);
+
+      // Then
+      for (const result of results) {
+        expect(result).toMatchObject({ ok: false, error: { code: "TOOL_ERROR" } });
+      }
+    } finally {
+      await registry.close();
+    }
+  });
+
   it("denies web-search routes whose nested MCP tool is denied", async () => {
     const workspace = await trackedWorkspace();
     workspace.config.permissions.tools.web_search = "allow";
@@ -215,6 +256,7 @@ describe("MCP runtime", () => {
     const fixture = path.join(process.cwd(), "tests", "fixtures", "mcp-echo.cjs");
     workspace.config.permissions.tools.mcp_call = "allow";
     workspace.config.permissions.tools["mcp__fixture__*"] = "allow";
+    workspace.config.permissions.tools["mcp__desktop_control__*"] = "allow";
     workspace.config.permissions.tools.mcp__fixture__echo = "allow";
     workspace.config.permissions.tools.mcp__fixture__search = "allow";
     await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
@@ -231,6 +273,13 @@ describe("MCP runtime", () => {
           type: "local",
           readOnly: true,
           command: [process.execPath, fixture]
+        },
+        desktop_control: {
+          enabled: true,
+          autoStart: true,
+          type: "local",
+          readOnly: false,
+          command: [process.execPath, fixture, "open-computer-use@0.2.0"]
         }
       },
       webSearch: {
@@ -240,6 +289,36 @@ describe("MCP runtime", () => {
 
     const registry = await createRuntimeToolRegistry(workspace.context);
     try {
+      const listGateway = registry.get("mcp_list_tools");
+      const gateway = registry.get("mcp_call");
+      if (!listGateway || !gateway) throw new Error("MCP gateway tools were not registered");
+      const ordinaryViews = [
+        listGateway.modelView?.(workspace.context),
+        gateway.modelView?.(workspace.context)
+      ];
+      const explicitContext = withComputerUseEnabled(workspace.context);
+      const explicitViews = [
+        listGateway.modelView?.(explicitContext),
+        gateway.modelView?.(explicitContext)
+      ];
+      expect(JSON.stringify(ordinaryViews)).not.toContain("desktop_control");
+      for (const view of ordinaryViews) {
+        expect(view?.description).toContain("fixture");
+        expect(view?.inputJsonSchema).toMatchObject({
+          properties: { server: { enum: ["fixture"] } }
+        });
+      }
+      for (const view of explicitViews) {
+        expect(view?.description).toContain("desktop_control, fixture");
+        expect(view?.inputJsonSchema).toMatchObject({
+          properties: { server: { enum: ["desktop_control", "fixture"] } }
+        });
+      }
+      const repeatedView = gateway.modelView?.(workspace.context);
+      expect(repeatedView).not.toBe(ordinaryViews[1]);
+      expect(repeatedView?.inputJsonSchema).not.toBe(ordinaryViews[1]?.inputJsonSchema);
+      expect(registry.get("mcp__desktop_control__echo")).toBeUndefined();
+
       const direct = registry.get("mcp__fixture__echo");
       expect(direct?.description).toContain("Echo input");
       expect(direct?.inputJsonSchema).toMatchObject({ required: ["value"] });
@@ -247,8 +326,6 @@ describe("MCP runtime", () => {
       const echoed = await direct.execute({ value: "hello" }, workspace.context);
       expect(echoed).toMatchObject({ ok: true, value: { content: "hello" } });
 
-      const gateway = registry.get("mcp_call");
-      if (!gateway) throw new Error("mcp_call was not registered");
       const gatewayEchoed = await gateway.execute({ server: "fixture", tool: "echo", arguments: { value: "gateway" } }, workspace.context);
       expect(gatewayEchoed).toMatchObject({ ok: true, value: { content: "gateway" } });
 

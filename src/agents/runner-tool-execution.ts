@@ -1,6 +1,11 @@
 import { toStrongCodeError } from "../core/errors";
 import { err, ok, type Result } from "../core/result";
-import type { ConversationItem, ConversationToolCallItem, ToolExecution } from "../core/types";
+import type {
+  ConversationItem,
+  ConversationToolCallItem,
+  ConversationToolResultItem,
+  ToolExecution
+} from "../core/types";
 import { createRuntimeEvent, type RuntimeEventSink } from "../runtime/events";
 import type { ToolInvocationContext } from "../runtime/context";
 import { conversationItemEvent } from "../sessions/session";
@@ -20,9 +25,32 @@ type ToolExecutionBatchInput = {
   readonly isClosed: () => boolean;
 };
 
+type ToolSettlement = {
+  readonly callId: ConversationToolCallItem["callId"];
+  readonly content: string;
+  readonly isError: boolean;
+};
+
+async function settleToolCall(input: ToolExecutionBatchInput, settlement: ToolSettlement): Promise<Result<void>> {
+  const resultItem: ConversationToolResultItem = Object.freeze({
+    type: "tool_result",
+    role: "tool",
+    callId: settlement.callId,
+    content: settlement.content,
+    isError: settlement.isError
+  });
+  const appended = await input.sessions.append(
+    input.sessionId,
+    conversationItemEvent(resultItem, input.agentId)
+  );
+  if (!appended.ok) return appended;
+  input.transcript.push(resultItem);
+  return ok(undefined);
+}
+
 export async function executeToolBatch(input: ToolExecutionBatchInput): Promise<Result<readonly ToolExecution[]>> {
   const executions: ToolExecution[] = [];
-  for (const admitted of input.calls) {
+  for (const [index, admitted] of input.calls.entries()) {
     if (input.context.signal?.aborted) return err(cancelledError());
     if (input.isClosed()) return err(toStrongCodeError("Agent runner is closed", "MODEL_ERROR"));
     input.emit(createRuntimeEvent("tool_started", `Running ${admitted.tool.name}`));
@@ -35,7 +63,24 @@ export async function executeToolBatch(input: ToolExecutionBatchInput): Promise<
     }
     if (input.context.signal?.aborted) return err(cancelledError());
     if (input.isClosed()) return err(toStrongCodeError("Agent runner is closed", "MODEL_ERROR"));
-    if (!result.ok && isTerminalToolFailure(result.error.code)) return result;
+    if (!result.ok && isTerminalToolFailure(result.error.code)) {
+      const terminalError = result.error;
+      const failed = await settleToolCall(input, {
+        callId: admitted.call.callId,
+        content: recoverableToolFailureContent(terminalError),
+        isError: true
+      });
+      if (!failed.ok) return failed;
+      for (const skipped of input.calls.slice(index + 1)) {
+        const settled = await settleToolCall(input, {
+          callId: skipped.call.callId,
+          content: `Tool skipped [${terminalError.code}]: the batch stopped after a terminal failure; this tool did not run.`,
+          isError: true
+        });
+        if (!settled.ok) return settled;
+      }
+      return result;
+    }
 
     const content = result.ok ? result.value.content : recoverableToolFailureContent(result.error);
     const execution: ToolExecution = {
@@ -43,19 +88,12 @@ export async function executeToolBatch(input: ToolExecutionBatchInput): Promise<
       input: admitted.call.input,
       output: content
     };
-    const resultItem = Object.freeze({
-      type: "tool_result" as const,
-      role: "tool" as const,
+    const settled = await settleToolCall(input, {
       callId: admitted.call.callId,
       content,
       isError: !result.ok
     });
-    const appended = await input.sessions.append(
-      input.sessionId,
-      conversationItemEvent(resultItem, input.agentId)
-    );
-    if (!appended.ok) return appended;
-    input.transcript.push(resultItem);
+    if (!settled.ok) return settled;
     executions.push(execution);
     input.emit(createRuntimeEvent("tool_finished", `Finished ${admitted.tool.name}`));
     if (input.context.signal?.aborted) return err(cancelledError());

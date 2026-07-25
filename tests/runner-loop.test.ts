@@ -2,10 +2,12 @@ import type { Agent } from "../src/agents/agent";
 import { AgentRunner } from "../src/agents/runner";
 import { resolveRunnerLoopLimits } from "../src/agents/runner-loop-limits";
 import { StrongCodeError, type StrongCodeErrorCode } from "../src/core/errors";
-import { err } from "../src/core/result";
+import { err, type Result } from "../src/core/result";
 import type { ModelProvider, ModelRequest, ModelResponse } from "../src/models/provider";
 import type { RuntimeEventType } from "../src/runtime/events";
+import type { ConversationSessionEvent } from "../src/sessions/session";
 import type { AttemptCreatedEvent } from "../src/sessions/session-ledger-events";
+import { SessionStore } from "../src/sessions/session-store";
 import type { Tool } from "../src/tools/tool";
 import {
   continuationAgent,
@@ -21,14 +23,29 @@ const GENEROUS_LIMITS = {
   maxTotalToolCalls: 8
 } as const;
 
-function failingTool(name: string, code: StrongCodeErrorCode): Tool {
+function failingTool(name: string, code: StrongCodeErrorCode, executions?: string[]): Tool {
   const tool = continuationTool(name, "unused", []);
   return {
     ...tool,
     async execute() {
+      executions?.push(name);
       return err(new StrongCodeError(code, `${name} failed`));
     }
   };
+}
+
+class TerminalResultFailingSessionStore extends SessionStore {
+  resultAppendAttempts = 0;
+
+  override async append(sessionId: string, event: ConversationSessionEvent): Promise<Result<void>> {
+    if (event.type === "conversation_item"
+      && event.item.type === "tool_result"
+      && event.item.callId === "terminal-beta") {
+      this.resultAppendAttempts += 1;
+      return err(new StrongCodeError("SESSION_ERROR", "Injected terminal result append failure"));
+    }
+    return super.append(sessionId, event);
+  }
 }
 
 describe("AgentRunner bounded model-tool loop", () => {
@@ -220,12 +237,230 @@ describe("AgentRunner bounded model-tool loop", () => {
     });
   });
 
+  it("continues a sequential batch after a recoverable tool failure", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta"]);
+    const executions: string[] = [];
+    const requests: ModelRequest[] = [];
+    harness.registry.register(failingTool("alpha", "TOOL_ERROR", executions));
+    harness.registry.register(continuationTool("beta", "BETA_OK", executions));
+    const model = scriptedProvider([
+      {
+        message: "",
+        toolCalls: [
+          { callId: "recoverable-alpha", name: "alpha", input: {} },
+          { callId: "recoverable-beta", name: "beta", input: {} }
+        ]
+      },
+      { message: "Recovered batch", toolCalls: [] }
+    ], requests);
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry, GENEROUS_LIMITS);
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "recoverable-batch");
+
+    // Then
+    expect(result).toMatchObject({ ok: true, value: { response: "Recovered batch" } });
+    expect(executions).toEqual(["alpha", "beta"]);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.items?.slice(-4)).toEqual([
+      { type: "tool_call", role: "assistant", callId: "recoverable-alpha", name: "alpha", input: {} },
+      { type: "tool_call", role: "assistant", callId: "recoverable-beta", name: "beta", input: {} },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "recoverable-alpha",
+        content: "Tool failed [TOOL_ERROR]: alpha failed",
+        isError: true
+      },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "recoverable-beta",
+        content: "BETA_OK",
+        isError: false
+      }
+    ]);
+  });
+
+  it("settles a terminal failure and skips later siblings in original call order", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const executions: string[] = [];
+    const requests: ModelRequest[] = [];
+    const events: RuntimeEventType[] = [];
+    harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
+    harness.registry.register(failingTool("beta", "PERMISSION_DENIED", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const model = scriptedProvider([
+      {
+        message: "",
+        toolCalls: [
+          { callId: "terminal-alpha", name: "alpha", input: { secret: "ALPHA_INPUT_SECRET" } },
+          { callId: "terminal-beta", name: "beta", input: { secret: "BETA_INPUT_SECRET" } },
+          { callId: "terminal-gamma", name: "gamma", input: { secret: "GAMMA_INPUT_SECRET" } }
+        ]
+      },
+      { message: "must not run", toolCalls: [] }
+    ], requests);
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry, {
+      ...GENEROUS_LIMITS,
+      emit: event => events.push(event.type)
+    });
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "terminal-batch");
+    const stored = await harness.sessions.read("terminal-batch");
+
+    // Then
+    expect(result).toMatchObject({ ok: false, error: { code: "PERMISSION_DENIED" } });
+    expect(requests).toHaveLength(1);
+    expect(executions).toEqual(["alpha", "beta"]);
+    expect(executions.filter(name => name === "gamma")).toHaveLength(0);
+    if (!stored.ok) throw stored.error;
+    const resultItems = stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item] : []
+    ));
+    expect(resultItems).toEqual([
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "terminal-alpha",
+        content: "ALPHA_OK",
+        isError: false
+      },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "terminal-beta",
+        content: "Tool failed [PERMISSION_DENIED]: beta failed",
+        isError: true
+      },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "terminal-gamma",
+        content: "Tool skipped [PERMISSION_DENIED]: the batch stopped after a terminal failure; this tool did not run.",
+        isError: true
+      }
+    ]);
+    expect(JSON.stringify(resultItems)).not.toContain("INPUT_SECRET");
+    expect(events.filter(event => event === "tool_started")).toHaveLength(2);
+    expect(events.filter(event => event === "tool_finished")).toHaveLength(1);
+    expect(events).not.toContain("run_finished");
+  });
+
+  it("reaches the provider on a same-session re-ask after terminal settlement", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const executions: string[] = [];
+    const failedRunRequests: ModelRequest[] = [];
+    const retryRequests: ModelRequest[] = [];
+    harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
+    harness.registry.register(failingTool("beta", "PERMISSION_DENIED", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const failedRunModel = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "retry-alpha", name: "alpha", input: {} },
+        { callId: "retry-beta", name: "beta", input: {} },
+        { callId: "retry-gamma", name: "gamma", input: {} }
+      ]
+    }], failedRunRequests);
+    const retryModel: ModelProvider = {
+      name: "retry-model",
+      async complete(request) {
+        retryRequests.push(request);
+        return { message: "Retry completed", toolCalls: [] };
+      }
+    };
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry, GENEROUS_LIMITS);
+
+    // When
+    const failedRun = await runner.run(
+      continuationAgent(harness.config, failedRunModel),
+      "Start",
+      "terminal-retry"
+    );
+    const retry = await runner.run(
+      continuationAgent(harness.config, retryModel),
+      "Try again",
+      "terminal-retry"
+    );
+
+    // Then
+    expect(failedRun).toMatchObject({ ok: false, error: { code: "PERMISSION_DENIED" } });
+    expect(retry).toMatchObject({ ok: true, value: { response: "Retry completed" } });
+    expect(failedRunRequests).toHaveLength(1);
+    expect(retryRequests).toHaveLength(1);
+    expect(executions).toEqual(["alpha", "beta"]);
+    expect(retryRequests[0]?.items?.filter(item => item.type === "tool_result")).toEqual([
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "retry-alpha",
+        content: "ALPHA_OK",
+        isError: false
+      },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "retry-beta",
+        content: "Tool failed [PERMISSION_DENIED]: beta failed",
+        isError: true
+      },
+      {
+        type: "tool_result",
+        role: "tool",
+        callId: "retry-gamma",
+        content: "Tool skipped [PERMISSION_DENIED]: the batch stopped after a terminal failure; this tool did not run.",
+        isError: true
+      }
+    ]);
+  });
+
+  it("returns a settlement append failure without retrying the append", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const executions: string[] = [];
+    const requests: ModelRequest[] = [];
+    const sessions = new TerminalResultFailingSessionStore(harness.context.dataDir);
+    harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
+    harness.registry.register(failingTool("beta", "PERMISSION_DENIED", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "terminal-alpha", name: "alpha", input: {} },
+        { callId: "terminal-beta", name: "beta", input: {} },
+        { callId: "terminal-gamma", name: "gamma", input: {} }
+      ]
+    }], requests);
+    const runner = new AgentRunner(harness.context, sessions, harness.registry, GENEROUS_LIMITS);
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "terminal-append-failure");
+
+    // Then
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "SESSION_ERROR", message: "Injected terminal result append failure" }
+    });
+    expect(sessions.resultAppendAttempts).toBe(1);
+    expect(requests).toHaveLength(1);
+    expect(executions).toEqual(["alpha", "beta"]);
+  });
+
   it.each([
     "PERMISSION_DENIED",
     "NESTED_SPAWN_DENIED",
     "SESSION_ERROR",
     "MODEL_ERROR",
-    "CANCELLED"
+    "CANCELLED",
+    "MODEL_STEP_LIMIT",
+    "TOOL_STEP_LIMIT",
+    "TOOL_TOTAL_LIMIT",
+    "TOOL_LOOP_DETECTED"
   ] satisfies readonly StrongCodeErrorCode[])("terminates on %s tool failures", async code => {
     // Given
     const harness = await createContinuationHarness(["helper"]);
@@ -247,10 +482,17 @@ describe("AgentRunner bounded model-tool loop", () => {
     expect(result).toMatchObject({ ok: false, error: { code } });
     expect(requests).toHaveLength(1);
     if (!stored.ok) throw stored.error;
-    expect(stored.value.events).not.toContainEqual(expect.objectContaining({
+    expect(stored.value.events).toContainEqual(expect.objectContaining({
       type: "conversation_item",
-      item: expect.objectContaining({ type: "tool_result", callId: `terminal-${code}` })
+      item: {
+        type: "tool_result",
+        role: "tool",
+        callId: `terminal-${code}`,
+        content: `Tool failed [${code}]: helper failed`,
+        isError: true
+      }
     }));
+    expect(events).not.toContain("tool_finished");
     expect(events).not.toContain("run_finished");
     expect(events).toContain(code === "CANCELLED" ? "run_cancelled" : "run_failed");
   });

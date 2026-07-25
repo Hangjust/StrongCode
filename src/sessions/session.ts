@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { StrongCodeError } from "../core/errors";
 import {
+  normalizeConversationItemsForPrompt,
   parseConversationItem,
   validateCompleteConversationItems,
   validateConversationItems,
@@ -253,7 +254,8 @@ export function eventsToModelConversationItems(events: readonly SessionEvent[]):
   const providerItems = eventsToConversationItems(events).filter(item => (
     item.type !== "text" || item.role !== "tool"
   ));
-  return validateCompleteConversationItems(providerItems);
+  const normalizedItems = normalizeConversationItemsForPrompt(providerItems);
+  return validateCompleteConversationItems(normalizedItems);
 }
 
 export function eventsToMessages(events: readonly SessionEvent[]): Message[] {

@@ -186,18 +186,38 @@ describe("ChatGPT direct Responses provider", () => {
       systemPrompt: "Be precise.",
       sessionId: "session/one",
       messages: [],
+      items: [
+        { type: "text", role: "user", content: "Inspect the workspace" },
+        { type: "tool_call", role: "assistant", callId: "call-history-a", name: "list_files", input: { path: "." } },
+        { type: "tool_call", role: "assistant", callId: "call-history-b", name: "list_files", input: { path: "src" } },
+        { type: "tool_result", role: "tool", callId: "call-history-a", content: "README.md", isError: false },
+        { type: "tool_result", role: "tool", callId: "call-history-b", content: "index.ts", isError: true }
+      ],
       tools: ["list_files"],
       toolDefinitions: [{ name: "list_files", description: "List files", inputSchema: { type: "object" } }]
     });
 
     expect(result).toEqual({ message: "Hello world", toolCalls: [{ callId: "call-1", name: "list_files", input: { path: "." } }] });
+    expect(requestBody?.["input"]).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] },
+      { type: "function_call", call_id: "call-history-a", name: "list_files", arguments: "{\"path\":\".\"}" },
+      { type: "function_call", call_id: "call-history-b", name: "list_files", arguments: "{\"path\":\"src\"}" },
+      { type: "function_call_output", call_id: "call-history-a", output: "README.md" },
+      { type: "function_call_output", call_id: "call-history-b", output: "index.ts" }
+    ]);
     expect(requestBody).toMatchObject({
       model: "gpt-5.5",
       instructions: "Be precise.",
       store: false,
       stream: true,
       prompt_cache_key: "session-one",
-      input: [{ role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] }],
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] },
+        { type: "function_call", call_id: "call-history-a", name: "list_files", arguments: '{"path":"."}' },
+        { type: "function_call", call_id: "call-history-b", name: "list_files", arguments: '{"path":"src"}' },
+        { type: "function_call_output", call_id: "call-history-a", output: "README.md" },
+        { type: "function_call_output", call_id: "call-history-b", output: "index.ts" }
+      ],
       tools: [{ type: "function", name: "list_files", description: "List files", parameters: { type: "object" }, strict: false }]
     });
   });

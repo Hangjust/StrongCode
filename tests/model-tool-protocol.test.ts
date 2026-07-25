@@ -18,7 +18,7 @@ function validationError(action: () => unknown): StrongCodeError {
 }
 
 describe("provider-neutral model and tool protocol", () => {
-  it("round-trips one correlated call and result through session projection", () => {
+  it("round-trips sibling calls followed by sibling results through session projection", () => {
     // Given
     const events = [
       conversationItemEvent({
@@ -29,10 +29,24 @@ describe("provider-neutral model and tool protocol", () => {
         input: { path: "README.md" }
       }),
       conversationItemEvent({
+        type: "tool_call",
+        role: "assistant",
+        callId: "call-2",
+        name: "read_file",
+        input: { path: "AGENTS.md" }
+      }),
+      conversationItemEvent({
         type: "tool_result",
         role: "tool",
         callId: "call-1",
         content: "StrongCode",
+        isError: false
+      }),
+      conversationItemEvent({
+        type: "tool_result",
+        role: "tool",
+        callId: "call-2",
+        content: "Instructions",
         isError: false
       })
     ];
@@ -43,6 +57,7 @@ describe("provider-neutral model and tool protocol", () => {
     // Then
     expect(projected).toEqual(events.map(event => event.item));
     expect(projected.filter(item => item.type === "tool_result" && item.callId === "call-1")).toHaveLength(1);
+    expect(projected.map(item => item.type)).toEqual(["tool_call", "tool_call", "tool_result", "tool_result"]);
   });
 
   it("rejects a tool result without a preceding call", () => {

@@ -30,6 +30,8 @@ export type ConversationToolResultItem = {
 
 export type ConversationItem = ConversationTextItem | ConversationToolCallItem | ConversationToolResultItem;
 
+const INTERRUPTED_TOOL_RESULT_CONTENT = "Tool execution was interrupted before a result was recorded; its outcome is unknown and StrongCode will not retry it automatically.";
+
 export type ReservedAttachmentItem = {
   readonly type: "attachment";
 };
@@ -111,6 +113,67 @@ export function validateConversationItems(sources: readonly unknown[]): Conversa
     items.push(item);
   }
   return items;
+}
+
+export function normalizeConversationItemsForPrompt(sources: readonly unknown[]): readonly ConversationItem[] {
+  const items = validateConversationItems(sources);
+  const unresolvedCallIds = new Set<CallId>();
+
+  for (const item of items) {
+    switch (item.type) {
+      case "text":
+        break;
+      case "tool_call":
+        unresolvedCallIds.add(item.callId);
+        break;
+      case "tool_result":
+        unresolvedCallIds.delete(item.callId);
+        break;
+      default: {
+        const exhaustiveItem: never = item;
+        return exhaustiveItem;
+      }
+    }
+  }
+
+  if (unresolvedCallIds.size === 0) return items;
+
+  const normalizedItems: ConversationItem[] = [];
+  const missingGroupCallIds: CallId[] = [];
+  const appendMissingGroupResults = (): void => {
+    for (const callId of missingGroupCallIds) {
+      normalizedItems.push({
+        type: "tool_result",
+        role: "tool",
+        callId,
+        content: INTERRUPTED_TOOL_RESULT_CONTENT,
+        isError: true
+      });
+    }
+    missingGroupCallIds.length = 0;
+  };
+
+  for (const item of items) {
+    switch (item.type) {
+      case "text":
+        appendMissingGroupResults();
+        normalizedItems.push(item);
+        break;
+      case "tool_call":
+        normalizedItems.push(item);
+        if (unresolvedCallIds.has(item.callId)) missingGroupCallIds.push(item.callId);
+        break;
+      case "tool_result":
+        normalizedItems.push(item);
+        break;
+      default: {
+        const exhaustiveItem: never = item;
+        return exhaustiveItem;
+      }
+    }
+  }
+  appendMissingGroupResults();
+  return normalizedItems;
 }
 
 export function validateCompleteConversationItems(sources: readonly unknown[]): ConversationItem[] {

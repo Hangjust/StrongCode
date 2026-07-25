@@ -27,16 +27,19 @@ function deferred<T>(): Deferred<T> {
 }
 
 describe("AgentRunner terminal state", () => {
-  it("fails closed when resuming after an in-flight tool cancellation", async () => {
+  it("persists an unknown outcome and resumes after an in-flight tool cancellation", async () => {
     // Given
     const harness = await createContinuationHarness(["helper"]);
     const controller = new AbortController();
     const started = deferred<void>();
     const late = deferred<ReturnType<typeof ok<{ content: string }>>>();
+    const events: RuntimeEventType[] = [];
+    let executions = 0;
     const baseTool = continuationTool("helper", "unused", []);
     harness.registry.register({
       ...baseTool,
       async execute() {
+        executions += 1;
         started.resolve(undefined);
         return late.promise;
       }
@@ -47,7 +50,8 @@ describe("AgentRunner terminal state", () => {
     const firstRunner = new AgentRunner(
       { ...harness.context, signal: controller.signal },
       harness.sessions,
-      harness.registry
+      harness.registry,
+      { emit: event => events.push(event.type) }
     );
     const pending = firstRunner.run(continuationAgent(harness.config, firstModel), "Start", "resume-cancelled");
     await started.promise;
@@ -55,6 +59,8 @@ describe("AgentRunner terminal state", () => {
     late.resolve(ok({ content: "late success" }));
     const cancelled = await pending;
     if (cancelled.ok) throw new Error("Expected cancellation");
+    const stored = await harness.sessions.read("resume-cancelled");
+    if (!stored.ok) throw stored.error;
     const resumeRequests: ModelRequest[] = [];
     const resumeRunner = new AgentRunner(harness.context, harness.sessions, harness.registry);
     const resumeModel = scriptedProvider([{ message: "Resumed", toolCalls: [] }], resumeRequests);
@@ -67,8 +73,28 @@ describe("AgentRunner terminal state", () => {
     );
 
     // Then
-    expect(resumed).toMatchObject({ ok: false, error: { code: "VALIDATION_ERROR" } });
-    expect(resumeRequests).toHaveLength(0);
+    expect(cancelled.error.code).toBe("CANCELLED");
+    expect(stored.value.events).toContainEqual(expect.objectContaining({
+      type: "conversation_item",
+      item: {
+        type: "tool_result",
+        role: "tool",
+        callId: "resume-cancelled-id",
+        content: "Tool interrupted [CANCELLED]: execution may have completed, but no reliable result was recorded; StrongCode will not retry it automatically.",
+        isError: true
+      }
+    }));
+    expect(stored.value.events.filter(event => (
+      event.type === "conversation_item"
+      && event.item.type === "tool_result"
+      && event.item.callId === "resume-cancelled-id"
+    ))).toHaveLength(1);
+    expect(resumed).toMatchObject({ ok: true, value: { response: "Resumed" } });
+    expect(resumeRequests).toHaveLength(1);
+    expect(executions).toBe(1);
+    expect(events).toContain("run_cancelled");
+    expect(events).not.toContain("tool_finished");
+    expect(events).not.toContain("run_finished");
   });
 
   it("cancels before forwarding the final assistant event to persistence", async () => {

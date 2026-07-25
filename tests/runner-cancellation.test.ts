@@ -1,8 +1,10 @@
 import type { Agent } from "../src/agents/agent";
 import { AgentRunner } from "../src/agents/runner";
 import { ok } from "../src/core/result";
+import type { ConversationToolResultItem } from "../src/core/types";
 import type { ModelRequest, ModelResponse } from "../src/models/provider";
 import type { RuntimeEventType } from "../src/runtime/events";
+import type { SessionEvent } from "../src/sessions/session";
 import {
   continuationAgent,
   continuationTool,
@@ -37,6 +39,12 @@ function options(events: RuntimeEventType[]) {
 function expectCancelled(events: readonly RuntimeEventType[]): void {
   expect(events).toContain("run_cancelled");
   expect(events).not.toContain("run_finished");
+}
+
+function toolResults(events: readonly SessionEvent[]): readonly ConversationToolResultItem[] {
+  return events.flatMap(event => (
+    event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item] : []
+  ));
 }
 
 describe("AgentRunner cancellation", () => {
@@ -133,10 +141,110 @@ describe("AgentRunner cancellation", () => {
     expect(requests).toHaveLength(1);
     const stored = await harness.sessions.read("tool-abort");
     if (!stored.ok) throw stored.error;
-    expect(stored.value.events).not.toContainEqual(expect.objectContaining({
-      type: "conversation_item",
-      item: expect.objectContaining({ type: "tool_result", callId: "tool-abort-id" })
-    }));
+    expect(toolResults(stored.value.events)).toEqual([{
+      type: "tool_result",
+      role: "tool",
+      callId: "tool-abort-id",
+      content: "Tool interrupted [CANCELLED]: execution may have completed, but no reliable result was recorded; StrongCode will not retry it automatically.",
+      isError: true
+    }]);
+    expectCancelled(events);
+    expect(events).not.toContain("tool_finished");
+  });
+
+  it("skips every persisted call when cancelled before the first execution", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta"]);
+    const controller = new AbortController();
+    const executions: string[] = [];
+    const resultAppendCalls: string[] = [];
+    harness.registry.register(continuationTool("alpha", "must not run", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    const append = harness.sessions.append.bind(harness.sessions);
+    vi.spyOn(harness.sessions, "append").mockImplementation(async (sessionId, event) => {
+      const result = await append(sessionId, event);
+      if (event.type === "conversation_item" && event.item.type === "tool_call" && event.item.callId === "pre-beta") {
+        controller.abort();
+      }
+      if (event.type === "conversation_item" && event.item.type === "tool_result") {
+        resultAppendCalls.push(event.item.callId);
+      }
+      return result;
+    });
+    const requests: ModelRequest[] = [];
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "pre-alpha", name: "alpha", input: {} },
+        { callId: "pre-beta", name: "beta", input: {} }
+      ]
+    }], requests);
+    const events: RuntimeEventType[] = [];
+    const runner = new AgentRunner({ ...harness.context, signal: controller.signal }, harness.sessions, harness.registry, options(events));
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "pre-tool-abort");
+
+    // Then
+    expect(result).toMatchObject({ ok: false, error: { code: "CANCELLED" } });
+    expect(requests).toHaveLength(1);
+    expect(executions).toEqual([]);
+    const stored = await harness.sessions.read("pre-tool-abort");
+    if (!stored.ok) throw stored.error;
+    expect(toolResults(stored.value.events).map(item => [item.callId, item.content, item.isError])).toEqual([
+      ["pre-alpha", "Tool skipped [CANCELLED]: the batch stopped after a terminal failure; this tool did not run.", true],
+      ["pre-beta", "Tool skipped [CANCELLED]: the batch stopped after a terminal failure; this tool did not run.", true]
+    ]);
+    expect(resultAppendCalls).toEqual(["pre-alpha", "pre-beta"]);
+    expect(events).not.toContain("tool_started");
+    expect(events).not.toContain("tool_finished");
+    expectCancelled(events);
+  });
+
+  it("settles later siblings as skipped when cancellation lands between calls", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta"]);
+    const controller = new AbortController();
+    const executions: string[] = [];
+    harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    const append = harness.sessions.append.bind(harness.sessions);
+    vi.spyOn(harness.sessions, "append").mockImplementation(async (sessionId, event) => {
+      const result = await append(sessionId, event);
+      if (result.ok
+        && event.type === "conversation_item"
+        && event.item.type === "tool_result"
+        && event.item.callId === "between-alpha") {
+        controller.abort();
+      }
+      return result;
+    });
+    const requests: ModelRequest[] = [];
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "between-alpha", name: "alpha", input: {} },
+        { callId: "between-beta", name: "beta", input: {} }
+      ]
+    }], requests);
+    const events: RuntimeEventType[] = [];
+    const runner = new AgentRunner({ ...harness.context, signal: controller.signal }, harness.sessions, harness.registry, options(events));
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "between-tool-abort");
+
+    // Then
+    expect(result).toMatchObject({ ok: false, error: { code: "CANCELLED" } });
+    expect(requests).toHaveLength(1);
+    expect(executions).toEqual(["alpha"]);
+    const stored = await harness.sessions.read("between-tool-abort");
+    if (!stored.ok) throw stored.error;
+    expect(toolResults(stored.value.events).map(item => [item.callId, item.content, item.isError])).toEqual([
+      ["between-alpha", "ALPHA_OK", false],
+      ["between-beta", "Tool skipped [CANCELLED]: the batch stopped after a terminal failure; this tool did not run.", true]
+    ]);
+    expect(events.filter(event => event === "tool_started")).toHaveLength(1);
+    expect(events.filter(event => event === "tool_finished")).toHaveLength(1);
     expectCancelled(events);
   });
 

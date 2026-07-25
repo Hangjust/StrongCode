@@ -1,10 +1,12 @@
-import type { ModelResponse } from "../src/models/provider";
+import { ok } from "../src/core/result";
+import type { ModelRequest, ModelResponse } from "../src/models/provider";
 import type { RuntimeEventType } from "../src/runtime/events";
 import { AgentRunner } from "../src/agents/runner";
 import { messageEvent, type ConversationSessionEvent, type SessionEvent } from "../src/sessions/session";
 import type { SessionCommitGuard } from "../src/sessions/session-store";
 import {
   continuationAgent,
+  continuationTool,
   createContinuationHarness,
   scriptedProvider
 } from "./runner-continuation-fixtures";
@@ -28,6 +30,86 @@ function hasAssistant(events: readonly SessionEvent[], content: string): boolean
 }
 
 describe("AgentRunner finalization commit race", () => {
+  it("waits for close-triggered in-flight settlement before closing", async () => {
+    // Given
+    const harness = await createContinuationHarness(["helper"]);
+    const toolStarted = deferred<void>();
+    const releaseTool = deferred<ReturnType<typeof ok<{ content: string }>>>();
+    const settlementStarted = deferred<void>();
+    const releaseSettlement = deferred<void>();
+    const registryCloseStarted = deferred<void>();
+    const baseTool = continuationTool("helper", "unused", []);
+    harness.registry.register({
+      ...baseTool,
+      async execute() {
+        toolStarted.resolve(undefined);
+        return releaseTool.promise;
+      }
+    });
+    harness.registry.addCloser(async () => {
+      registryCloseStarted.resolve(undefined);
+      releaseTool.resolve(ok({ content: "late close success" }));
+    });
+    const append = harness.sessions.append.bind(harness.sessions);
+    let resultAppendAttempts = 0;
+    vi.spyOn(harness.sessions, "append").mockImplementation(async (sessionId, event) => {
+      if (event.type === "conversation_item"
+        && event.item.type === "tool_result"
+        && event.item.callId === "close-tool-id") {
+        resultAppendAttempts += 1;
+        settlementStarted.resolve(undefined);
+        await releaseSettlement.promise;
+      }
+      return append(sessionId, event);
+    });
+    const requests: ModelRequest[] = [];
+    const events: RuntimeEventType[] = [];
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [{ callId: "close-tool-id", name: "helper", input: {} }]
+    }], requests);
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry, {
+      emit: event => events.push(event.type)
+    });
+    const pending = runner.run(continuationAgent(harness.config, model), "Start", "close-in-flight");
+    await toolStarted.promise;
+
+    // When
+    let closeResolved = false;
+    const closing = runner.close().then(() => {
+      closeResolved = true;
+    });
+    await registryCloseStarted.promise;
+    await settlementStarted.promise;
+    expect(closeResolved).toBe(false);
+    releaseSettlement.resolve(undefined);
+    const result = await pending;
+    await closing;
+
+    // Then
+    expect(result).toMatchObject({ ok: false, error: { code: "MODEL_ERROR" } });
+    expect(requests).toHaveLength(1);
+    expect(resultAppendAttempts).toBe(1);
+    const stored = await harness.sessions.read("close-in-flight");
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.filter(event => (
+      event.type === "conversation_item"
+      && event.item.type === "tool_result"
+      && event.item.callId === "close-tool-id"
+    ))).toEqual([expect.objectContaining({
+      item: {
+        type: "tool_result",
+        role: "tool",
+        callId: "close-tool-id",
+        content: "Tool interrupted [MODEL_ERROR]: execution may have completed, but no reliable result was recorded; StrongCode will not retry it automatically.",
+        isError: true
+      }
+    })]);
+    expect(events).toContain("run_failed");
+    expect(events).not.toContain("tool_finished");
+    expect(events).not.toContain("run_finished");
+  });
+
   it("cancels when abort wins inside the queued guard immediately before write", async () => {
     // Given
     const harness = await createContinuationHarness([]);

@@ -1,6 +1,7 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { afterEach } from "vitest";
 import { ensureStrongCodeHome } from "../src/config/home";
 import { loadMcpConfig, mcpConfigSchema } from "../src/mcp/config";
 import { createRuntimeToolRegistry } from "../src/mcp/runtime-registry";
@@ -9,10 +10,29 @@ import { DEFAULT_AGENT_TOOLS, DEFAULT_TOOL_PERMISSIONS } from "../src/tools/defa
 import { namespacedMcpToolName } from "../src/mcp/names";
 import { tempWorkspace } from "./helpers";
 
+const roots = new Set<string>();
+
+async function mcpHome(): Promise<string> {
+  const home = await mkdtemp(path.join(tmpdir(), "strongcode-mcp-home-"));
+  roots.add(home);
+  return home;
+}
+
+async function trackedWorkspace(): Promise<Awaited<ReturnType<typeof tempWorkspace>>> {
+  const workspace = await tempWorkspace();
+  roots.add(workspace.root);
+  return workspace;
+}
+
+afterEach(async () => {
+  await Promise.all([...roots].map(root => rm(root, { recursive: true, force: true })));
+  roots.clear();
+});
+
 describe("MCP runtime", () => {
   it("ships a valid default MCP catalog without literal credentials", async () => {
     // Given / When / Then a default home layout is generated and loaded
-    const home = await mkdtemp(path.join(tmpdir(), "strongcode-mcp-home-"));
+    const home = await mcpHome();
     await ensureStrongCodeHome({ homePath: home });
     const config = await loadMcpConfig(path.join(home, "mcp.json"));
 
@@ -95,7 +115,7 @@ describe("MCP runtime", () => {
   });
 
   it("denies generic MCP calls when the nested namespaced tool is denied", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = await trackedWorkspace();
     workspace.config.permissions.tools.mcp_call = "allow";
     workspace.config.permissions.tools.mcp__fixture__echo = "deny";
     await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
@@ -125,7 +145,7 @@ describe("MCP runtime", () => {
   });
 
   it("applies child effective permissions to nested generic MCP calls", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = await trackedWorkspace();
     workspace.config.permissions.tools.mcp_call = "allow";
     workspace.config.permissions.tools.mcp__fixture__echo = "allow";
     await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
@@ -160,7 +180,7 @@ describe("MCP runtime", () => {
   });
 
   it("denies web-search routes whose nested MCP tool is denied", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = await trackedWorkspace();
     workspace.config.permissions.tools.web_search = "allow";
     workspace.config.permissions.tools.mcp__fixture__search = "deny";
     await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
@@ -191,7 +211,7 @@ describe("MCP runtime", () => {
   });
 
   it("calls stdio MCP tools through direct and permitted generic routes plus the web fallback route", async () => {
-    const workspace = await tempWorkspace();
+    const workspace = await trackedWorkspace();
     const fixture = path.join(process.cwd(), "tests", "fixtures", "mcp-echo.cjs");
     workspace.config.permissions.tools.mcp_call = "allow";
     workspace.config.permissions.tools["mcp__fixture__*"] = "allow";

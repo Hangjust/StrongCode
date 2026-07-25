@@ -1,3 +1,4 @@
+import type { AgentRuntimeRole } from "../agents/agent";
 import { StrongCodeError } from "../core/errors";
 import { err, ok, type Result } from "../core/result";
 import type { ToolInvocationContext } from "../runtime/context";
@@ -25,6 +26,19 @@ export function computerUseEnabled(context: ToolInvocationContext): boolean {
 
 export function withComputerUseEnabled(context: ToolInvocationContext): ToolInvocationContext {
   return { ...context, computerUse: "explicit-user-request" };
+}
+
+export function deriveComputerUseTurnContext(
+  context: ToolInvocationContext,
+  runtimeRole: AgentRuntimeRole,
+  prompt: string
+): ToolInvocationContext {
+  const { computerUse: _computerUse, ...contextWithoutComputerUse } = context;
+  return runtimeRole === "primary"
+    && context.taskId === undefined
+    && computerUseRequested(prompt)
+    ? withComputerUseEnabled(contextWithoutComputerUse)
+    : contextWithoutComputerUse;
 }
 
 export function isOpenComputerUseTool(toolName: string): boolean {

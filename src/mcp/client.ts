@@ -10,10 +10,11 @@ import { StrongCodeError } from "../core/errors";
 import type { RuntimeContext, ToolInvocationContext } from "../runtime/context";
 import { resolveWorkspaceRealPath } from "../tools/builtin/list-files";
 import { assertToolAllowed } from "../tools/permissions";
+import { assertComputerUseEnabled } from "../tools/computer-use-policy";
 import {
-  assertComputerUseEnabled,
-  OPEN_COMPUTER_USE_SERVER_ID
-} from "../tools/computer-use-policy";
+  isOpenComputerUseServer,
+  visibleMcpServerIds
+} from "./computer-use-server";
 import type { McpConfig, McpServerConfig } from "./config";
 import { namespacedMcpToolPattern } from "./names";
 import { createOAuthCallbackServer, PersistentOAuthProvider } from "./oauth";
@@ -28,11 +29,6 @@ export interface ConnectedMcpServer {
 
 function isLocal(config: McpServerConfig): config is Extract<McpServerConfig, { type: "local" | "stdio" }> {
   return config.type === "local" || config.type === "stdio";
-}
-
-function isOpenComputerUseServer(serverId: string, server: McpServerConfig): boolean {
-  return serverId === OPEN_COMPUTER_USE_SERVER_ID
-    || (isLocal(server) && server.command.some(argument => /^open-computer-use(?:@|$)/i.test(argument)));
 }
 
 export function selectedMcpEnvironment(
@@ -105,8 +101,8 @@ export class McpManager {
     return server.timeout?.requestMs ?? this.config.defaults.timeout.requestMs;
   }
 
-  serverIds(): string[] {
-    return Object.entries(this.config.mcpServers).filter(([, server]) => server.enabled).map(([id]) => id).sort();
+  serverIds(invocationContext: ToolInvocationContext = this.context): string[] {
+    return visibleMcpServerIds(this.config, invocationContext).sort();
   }
 
   async connect(

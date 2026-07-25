@@ -4,8 +4,6 @@ import { err, ok, type Result } from "../core/result";
 import { createRuntimeEvent, type RuntimeEventSink } from "../runtime/events";
 import type { SessionStore } from "../sessions/session-store";
 import { eventsToModelConversationItems, messageEvent } from "../sessions/session";
-import { assertToolAllowed } from "../tools/permissions";
-import { assertChildToolAllowed } from "../tools/child-policy";
 import type { ToolRegistry } from "../tools/registry";
 import type { Agent } from "./agent";
 import type { ToolInvocationContext } from "../runtime/context";
@@ -15,13 +13,12 @@ import { compactSession, type AgentCompactionResult } from "./compactor";
 import { runModelToolLoop, type RunnerLoopCompletion } from "./runner-loop";
 import { resolveRunnerLoopLimits, type RunnerLoopLimitOptions, type RunnerLoopLimits } from "./runner-loop-limits";
 import { runnerInterruption } from "./runner-outcome";
-import { modelToolDefinition } from "./runner-tool-batch";
+import { createModelToolSnapshot } from "./runner-tool-batch";
 import { SessionOperationCoordinator } from "./session-operation-coordinator";
 import {
   computerUseEnabled,
-  computerUseRequested,
-  isOpenComputerUseTool,
-  withComputerUseEnabled
+  deriveComputerUseTurnContext,
+  isOpenComputerUseTool
 } from "../tools/computer-use-policy";
 import {
   runPrimaryPreflight,
@@ -172,6 +169,8 @@ export class AgentRunner {
     const interruptedAtStart = runnerInterruption(this.context.signal, this.closed);
     if (interruptedAtStart) return interruptedAtStart;
     const { agent, prompt, sessionId, approvedItems } = execution;
+    const runtimeRole = agent.runtimeRole ?? "primary";
+    const turnContext = deriveComputerUseTurnContext(this.context, runtimeRole, prompt);
 
     let priorItems = approvedItems;
     let untrustedPreflightAdvice: UntrustedPreflightAdvice | undefined;
@@ -191,7 +190,7 @@ export class AgentRunner {
             prompt,
             sessionId,
             events: beforeSession.value.events,
-            context: this.context,
+            context: turnContext,
             tools: this.tools
           });
           if (!preflight.ok) return preflight;
@@ -210,25 +209,12 @@ export class AgentRunner {
     const interruptedAfterUser = runnerInterruption(this.context.signal, this.closed);
     if (interruptedAfterUser) return interruptedAfterUser;
 
-    const runtimeRole = agent.runtimeRole ?? "primary";
-    const directUserRequest = runtimeRole === "primary"
-      && this.context.taskId === undefined
-      && computerUseRequested(prompt);
-    const turnContext = directUserRequest
-      ? withComputerUseEnabled(this.context)
-      : this.context;
     const resolvedTools = this.tools.resolve(agent.config.tools);
     const policyTools = filterToolsForAgentPolicy(agent.toolPolicy, resolvedTools);
     const runtimeTools = filterToolsForRuntimeRole(runtimeRole, policyTools).filter(tool => (
       computerUseEnabled(turnContext) || !isOpenComputerUseTool(tool.name)
     ));
-    const enabledTools = runtimeTools.filter(tool => (
-      assertChildToolAllowed(turnContext, tool).ok
-      && assertToolAllowed(turnContext.config, tool.name, turnContext.effectivePermissions).ok
-    ));
-    const enabledToolNames = enabledTools.map(tool => tool.name);
-    const toolsByName = new Map(runtimeTools.map(tool => [tool.name, tool]));
-    const toolDefinitions = enabledTools.map(modelToolDefinition);
+    const toolSnapshot = createModelToolSnapshot(runtimeTools, turnContext);
     return runModelToolLoop({
       agent,
       prompt,
@@ -238,9 +224,9 @@ export class AgentRunner {
       emit: this.emit,
       limits: this.limits,
       transcript: [...priorItems, { type: "text", role: "user", content: prompt }],
-      enabledToolNames,
-      toolDefinitions,
-      toolsByName,
+      enabledToolNames: toolSnapshot.enabledToolNames,
+      toolDefinitions: toolSnapshot.toolDefinitions,
+      toolsByName: toolSnapshot.toolsByName,
       isClosed: () => this.closed,
       ...(untrustedPreflightAdvice === undefined ? {} : { untrustedPreflightAdvice })
     });

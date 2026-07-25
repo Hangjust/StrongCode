@@ -3,7 +3,7 @@ import { validateConversationItems } from "../../core/types";
 import type { ModelResponse } from "../../models/provider";
 import type { ToolInvocationContext } from "../../runtime/context";
 import { admitLoopToolCalls, beginModelStep, INITIAL_RUNNER_LOOP_STATE } from "../runner-loop-limits";
-import { modelToolDefinition } from "../runner-tool-batch";
+import { projectModelTools } from "../runner-tool-batch";
 import { modelTurn } from "../model-turn";
 import { admitPreflightToolBatch } from "./scheduler-data-boundary";
 import {
@@ -45,9 +45,6 @@ export class PreflightModelToolExecutor {
       this.dependencies.trace?.emit({ kind: "validation", stage: input.stage, code: "tool_permission_denied" });
       return { ok: false, code: "tool_permission_denied" };
     }
-    const tools = advertisedTools(input);
-    this.dependencies.trace?.emit({ kind: "tool-decision", stage: input.stage, code: "advertise" });
-    const toolsByName = new Map(tools.map(tool => [tool.name, tool]));
     const invocation: ToolInvocationContext = {
       ...input.context,
       signal: input.signal,
@@ -55,6 +52,10 @@ export class PreflightModelToolExecutor {
         effectivePermissions: input.effectivePermissions
       })
     };
+    const tools = advertisedTools(input);
+    const modelTools = projectModelTools(tools, invocation);
+    this.dependencies.trace?.emit({ kind: "tool-decision", stage: input.stage, code: "advertise" });
+    const toolsByName = new Map(modelTools.visibleTools.map(tool => [tool.name, tool]));
     const transcript: ConversationItem[] = [
       { type: "text", role: "user", content: input.prompt },
       ...(input.userContent ?? []).map(content => ({ type: "text" as const, role: "user" as const, content }))
@@ -87,8 +88,8 @@ export class PreflightModelToolExecutor {
           sessionId: input.sessionId,
           messages: [],
           items: Object.freeze([...transcript]),
-          tools: tools.map(tool => tool.name),
-          toolDefinitions: tools.map(modelToolDefinition),
+          tools: [...modelTools.names],
+          toolDefinitions: [...modelTools.definitions],
           signal: input.signal
         }), input.signal, () => this.dependencies.trace?.emit({
           kind: "provider-attempt",

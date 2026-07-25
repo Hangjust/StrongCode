@@ -18,6 +18,11 @@ export type ToolEffect =
   | "spawn"
   | "unclassified";
 
+export type ToolModelView = {
+  readonly description?: string;
+  readonly inputJsonSchema?: Readonly<Record<string, unknown>>;
+};
+
 export interface Tool {
   name: string;
   /** Original provider name when registration transforms the public tool name. */
@@ -27,6 +32,8 @@ export interface Tool {
   inputSchema: z.ZodType<unknown>;
   /** JSON Schema passed to model providers. Defaults to an open object. */
   inputJsonSchema?: Record<string, unknown>;
+  /** Model-facing metadata for this invocation. Returning undefined hides the tool. */
+  readonly modelView?: (context: ToolInvocationContext) => ToolModelView | undefined;
   /** Used by role-level policies that must remain read-only. */
   readOnly?: boolean;
   execute(input: unknown, context: ToolInvocationContext): Promise<Result<ToolResult>>;

@@ -10,7 +10,7 @@ import {
   assertToolAllowedByAgentPolicy
 } from "../tools/capability-policy";
 import { assertToolAllowed } from "../tools/permissions";
-import type { Tool } from "../tools/tool";
+import type { Tool, ToolModelView } from "../tools/tool";
 import type { Agent } from "./agent";
 
 export type ToolBatchContext = {
@@ -23,6 +23,18 @@ export type AdmittedToolCall<T extends ToolCall> = {
   readonly call: T;
   readonly tool: Tool;
 };
+
+export type ModelToolProjection = Readonly<{
+  visibleTools: readonly Tool[];
+  names: readonly string[];
+  definitions: readonly ModelToolDefinition[];
+}>;
+
+export type ModelToolSnapshot = Readonly<{
+  enabledToolNames: readonly string[];
+  toolDefinitions: readonly ModelToolDefinition[];
+  toolsByName: ReadonlyMap<string, Tool>;
+}>;
 
 export function admitToolBatch<T extends ToolCall>(
   toolCalls: readonly T[],
@@ -54,10 +66,47 @@ export function admitToolBatch<T extends ToolCall>(
   return ok(admitted);
 }
 
-export function modelToolDefinition(tool: Tool): ModelToolDefinition {
+export function modelToolDefinition(tool: Tool, view?: ToolModelView): ModelToolDefinition {
   return {
     name: tool.name,
-    description: tool.description,
-    inputSchema: tool.inputJsonSchema ?? { type: "object", additionalProperties: true }
+    description: view?.description ?? tool.description,
+    inputSchema: view?.inputJsonSchema ?? tool.inputJsonSchema ?? { type: "object", additionalProperties: true }
+  };
+}
+
+export function projectModelTools(
+  tools: readonly Tool[],
+  context: ToolInvocationContext
+): ModelToolProjection {
+  const visibleTools: Tool[] = [];
+  const names: string[] = [];
+  const definitions: ModelToolDefinition[] = [];
+  for (const tool of tools) {
+    const modelView = tool.modelView;
+    const view = modelView?.(context);
+    if (modelView !== undefined && view === undefined) {
+      continue;
+    }
+    const definition = modelToolDefinition(tool, view);
+    visibleTools.push(tool);
+    names.push(definition.name);
+    definitions.push(definition);
+  }
+  return { visibleTools, names, definitions };
+}
+
+export function createModelToolSnapshot(
+  tools: readonly Tool[],
+  context: ToolInvocationContext
+): ModelToolSnapshot {
+  const modelTools = projectModelTools(tools, context);
+  const permittedToolNames = new Set(modelTools.visibleTools.filter(tool => (
+    assertChildToolAllowed(context, tool).ok
+    && assertToolAllowed(context.config, tool.name, context.effectivePermissions).ok
+  )).map(tool => tool.name));
+  return {
+    enabledToolNames: modelTools.names.filter(name => permittedToolNames.has(name)),
+    toolDefinitions: modelTools.definitions.filter(definition => permittedToolNames.has(definition.name)),
+    toolsByName: new Map(modelTools.visibleTools.map(tool => [tool.name, tool]))
   };
 }

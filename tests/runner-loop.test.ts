@@ -652,6 +652,7 @@ describe("AgentRunner bounded model-tool loop", () => {
     // Then
     expect(result).toMatchObject({ ok: false, error: { code } });
     expect(requests).toHaveLength(1);
+    expect(requests[0]?.tools).toEqual(requests[0]?.toolDefinitions?.map(definition => definition.name));
     if (!stored.ok) throw stored.error;
     expect(stored.value.events).toContainEqual(expect.objectContaining({
       type: "conversation_item",

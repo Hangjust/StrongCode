@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { Agent } from "../src/agents/agent";
 import type { PrimaryPreflightScheduler } from "../src/agents/preflight/runner-gate";
+import { PreflightScheduler } from "../src/agents/preflight/scheduler";
+import { PreflightRunRegistry } from "../src/agents/preflight/scheduler-registry";
 import { AgentRunner } from "../src/agents/runner";
 import { ok } from "../src/core/result";
 import type { ModelRequest } from "../src/models/provider";
@@ -44,14 +46,27 @@ describe("preflight model tool projection", () => {
       input: { query: "must not run" }
     }]));
     harness.models.enqueue("summary", completeDecision("Unexpected inherited route"));
+    let schedulerId = 0;
+    const scheduler = new PreflightScheduler({
+      sessions: harness.sessions,
+      registry: new PreflightRunRegistry(),
+      clock: harness.clock,
+      ids: { next: () => `inherited-preflight-${++schedulerId}` },
+      createAgent: harness.models.factory,
+      resolveModelSnapshot: ({ role }) => ({
+        modelRef: `fixture-${role}`,
+        providerRef: "fixture-provider",
+        displayName: `Fixture ${role}`
+      })
+    });
     let scheduledContext: ToolInvocationContext | undefined;
     const preflight: PrimaryPreflightScheduler = {
       async run(input) {
         scheduledContext = input.context;
-        return harness.scheduler.run(input);
+        return scheduler.run(input);
       },
       async close(reason) {
-        await harness.scheduler.close(reason);
+        await scheduler.close(reason);
       }
     };
     const primaryRequests: ModelRequest[] = [];

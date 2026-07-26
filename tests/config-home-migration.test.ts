@@ -89,7 +89,7 @@ describe("StrongCode home migration", () => {
     );
   });
 
-  it("retains old hashes and appends exact version-8 generated file hashes", () => {
+  it("retains old hashes and appends exact version-9 generated file hashes", () => {
     // Given
     const expected = {
       "mcp.json": [
@@ -107,7 +107,8 @@ describe("StrongCode home migration", () => {
         "733bffba3e4633a4aeeacfbeee07cfee1a38979026edb0c31ec16fd2152b65b8",
         "4410f3f81cd2e96628be1cfe2c1f5bb33a4a275c7ef5b60b8ac56eb99d08a38c",
         "f8572f1364acf862e7b9801ad736139df2798af790d966660d20b495fc661256",
-        "0571815cce8fa3f1e06758bd5847d2bc4a845b5f3abf862ad4a626c7878c443d"
+        "0571815cce8fa3f1e06758bd5847d2bc4a845b5f3abf862ad4a626c7878c443d",
+        "1ebf9a41e9fad0aba15b5cb7c9dabd68190b1aa276ead2c6f1c604ba2b2d0213"
       ]
     } as const;
 
@@ -131,7 +132,7 @@ describe("StrongCode home migration", () => {
     const expanded = await ensureStrongCodeHome({ homePath, expand: true });
 
     // Then
-    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(9);
+    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(10);
     expect(expanded.upgradedFiles).toEqual(fixturesByVersion[8].map(fixture => fixture.name).sort());
     await expectCurrentStarters(homePath);
   });
@@ -188,7 +189,7 @@ describe("StrongCode home migration", () => {
     await expect(readFile(customPath)).resolves.toEqual(customized);
   });
 
-  it("upgrades authentic version-7 files directly to version 9", async () => {
+  it("upgrades authentic version-7 files directly to version 10", async () => {
     // Given
     const homePath = await createTemporaryHome("strongcode-home-v7-direct-");
     await seedGeneratedHome(homePath, 7);

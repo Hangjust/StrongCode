@@ -2,6 +2,7 @@
 import path from "node:path";
 import { createProgram } from "./cli/program";
 import type { CliDependencies } from "./cli/types";
+import { enforceHomeCacheRetention } from "./config/cache-retention";
 import { ensureStrongCodeHome } from "./config/home";
 import { resolveStrongCodeHome } from "./config/paths";
 import { StrongCodeError } from "./core/errors";
@@ -81,6 +82,20 @@ export async function main(argv: string[], dependencies: CliDependencies = {}): 
     }
 
     await ensureStrongCodeHome({ homePath });
+    const startsAgentRuntime = argv.length === 2 || argv[2] === "run";
+    if (startsAgentRuntime) {
+      try {
+        const retention = await (dependencies.enforceCacheRetention ?? enforceHomeCacheRetention)(homePath);
+        if (retention.skippedPaths.includes("config/retention.json")) {
+          (dependencies.reportCacheRetentionError ?? console.error)(
+            "Cache retention policy is invalid or unsafe; cleanup skipped."
+          );
+        }
+      } catch (error) {
+        const detail = sanitizeTerminalLine(error instanceof Error ? error.message : String(error));
+        (dependencies.reportCacheRetentionError ?? console.error)(`Cache retention skipped: ${detail}`);
+      }
+    }
     const runtimeCommand = argv.length === 2 || ["run", "tools", "session"].includes(argv[2] ?? "");
     const explicitConfig = argv.some(argument => argument === "--config" || argument.startsWith("--config="));
     const needsCoreSetup = runtimeCommand

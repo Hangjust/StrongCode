@@ -113,6 +113,8 @@ Runtime authority is `strongcode.config.yaml` plus StrongCode's compiled typed a
 
 Automatic bootstrap is monotonic: it creates missing core artifacts and does not modify existing files. Run `strongcode home --expand` to replace only byte-identical, known StrongCode starter files; customized files are preserved.
 
+StrongCode applies cache retention only when starting the TUI or a `run` command. The trusted-home `config/retention.json` file sets `cacheDays` to a non-negative integer (30 by default); `null` disables cleanup and `0` expires entries immediately. Invalid or unsafe policy files disable cleanup with a warning, and cache-maintenance failures never block startup.
+
 ## Basic Usage
 
 Run the one-time global setup:

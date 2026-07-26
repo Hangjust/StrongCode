@@ -210,7 +210,7 @@ describe("ChatGPT direct Responses provider", () => {
       instructions: "Be precise.",
       store: false,
       stream: true,
-      prompt_cache_key: "session-one",
+      prompt_cache_key: expect.stringMatching(/^strongcode-[a-f0-9]{53}$/),
       input: [
         { role: "user", content: [{ type: "input_text", text: "Inspect the workspace" }] },
         { type: "function_call", call_id: "call-history-a", name: "list_files", arguments: '{"path":"."}' },

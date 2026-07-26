@@ -8,6 +8,7 @@ import { modelRequestItems, type ModelProvider, type ModelRequest, type ModelRes
 import type { ProviderResponseBody } from "./response-body";
 import { MAX_COMPLETION_RESPONSE_BYTES, readBoundedResponseText } from "./response-body";
 import { parseOpenAICompatibleErrorDetails, parseOpenAICompatibleResponse } from "./openai-compatible-response";
+import { promptCacheKey } from "./prompt-cache";
 
 type ChatRole = "system" | "user" | "assistant" | "tool";
 
@@ -59,6 +60,11 @@ function buildChatCompletionsUrl(providerId: string, providerConfig: Pick<Provid
 
 function completionUrl(providerId: string, providerConfig: Pick<ProviderConfig, "baseUrl">): string {
   return buildChatCompletionsUrl(providerId, providerConfig);
+}
+
+function supportsOpenAIPromptCaching(completionEndpoint: string): boolean {
+  const endpoint = new URL(completionEndpoint);
+  return endpoint.protocol === "https:" && endpoint.hostname === "api.openai.com" && endpoint.port === "";
 }
 
 function globalOpenAICompatibleFetchTransport(): OpenAICompatibleFetcher {
@@ -165,6 +171,9 @@ export class OpenAICompatibleModelProvider implements ModelProvider {
     const body = JSON.stringify({
       model: this.options.modelConfig.model ?? this.options.modelId,
       messages,
+      ...(this.options.providerConfig.type === "openai" && supportsOpenAIPromptCaching(url)
+        ? { prompt_cache_key: promptCacheKey(request.sessionId) }
+        : {}),
       ...(request.tools.length > 0 ? {
         tools: (request.toolDefinitions ?? request.tools.map(name => ({
           name,

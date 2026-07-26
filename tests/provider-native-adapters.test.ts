@@ -114,6 +114,7 @@ describe("native and local provider adapters", () => {
       expect(JSON.parse(calls[0].init.body)).toMatchObject({
         model: "claude-test",
         max_tokens: 4096,
+        cache_control: { type: "ephemeral" },
         system: "Be precise.",
         messages: [{ role: "user", content: "hello" }]
       });

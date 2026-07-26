@@ -21,7 +21,7 @@ function lines(...value: string[]): string {
   return `${value.join("\n")}\n`;
 }
 
-export const STRONGCODE_HOME_LAYOUT_VERSION = 9;
+export const STRONGCODE_HOME_LAYOUT_VERSION = 10;
 
 const STRONGCODE_HOME_EXPANDED_DIRECTORIES = [
   "agents",
@@ -163,6 +163,7 @@ const STRONGCODE_HOME_EXPANDED_DIRECTORIES = [
 export const STRONGCODE_HOME_DIRECTORIES = [
   "agents",
   "cache",
+  "config",
   "credentials",
   "credentials/codex",
   "credentials/codex/workspace",
@@ -856,6 +857,7 @@ export const STRONGCODE_HOME_EXPANDED_STARTER_FILES: Record<string, StrongCodeHo
       "Generated `agents.json` and `prompts/agents/*.md` are review/setup mirrors. They are not runtime-loaded, and edits to them do not affect runtime.",
       "Trusted-home `categories.json` supplies lower-precedence category routing; `strongcode.config.yaml` wins field-wise.",
       "Other generated JSON catalogs document setup defaults and discovered resources; use the supported runtime configuration paths for durable changes.",
+      "`config/retention.json` is runtime configuration: `cacheDays` is a non-negative integer, `null` disables cleanup, and the default is 30 days.",
       "Credentials stay in private `auth.json`; setup state stays in `setup.json`.",
       "Runtime state uses `sessions/`, `project-auth/`, `tui/`, `logs/`, and `cache/`.",
       ...PREFLIGHT_HOME_DOCUMENTATION
@@ -1152,6 +1154,7 @@ const STRONGCODE_HOME_CORE_FILES = new Set([
   "agents.json",
   "auth.json",
   "categories.json",
+  "config/retention.json",
   "mcp.json",
   "models.json",
   "package.json",
@@ -1177,11 +1180,11 @@ export const STRONGCODE_HOME_LEGACY_HASHES: Record<string, readonly string[]> = 
   "mcp.json": ["d4f41040dd1622f1b5f936d9b6705372ec2eaf85625535dddbd903112954e4ad", "d7fb203472edf219daf70c1e3be7cf109adbca6becd8980362c3be2af32461dc", "711bbf5ed3e93f42c4f8cd2317bbadf88b66f12a74634eeaf57d020f0f9c0c5e"],
   "package.json": ["a98249b792eff6d0c4d78ed427c9d24301f6f083ea429bdcb25f071799861212"],
   "providers.json": ["104560e6065d7eee49e00eee3a9672f494c6e7a6d24e0dc0c16570ab5e999e2d", "a71b26077a6c199060f768e8d0baf058175213cd4be8b0aeddb3a4ab183293ed"],
-  "README.md": ["f78fc1863ca3f32d760c1a7c56e4031c6e400322d6f801f778bcc8ec78b9dfdd", "a947891a9343c9ea9189ff1ff19bc34fee2bc175889edb96d5c00a5c7fd30f1d", "febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005"],
+  "README.md": ["f78fc1863ca3f32d760c1a7c56e4031c6e400322d6f801f778bcc8ec78b9dfdd", "a947891a9343c9ea9189ff1ff19bc34fee2bc175889edb96d5c00a5c7fd30f1d", "febcc57ec494626888dc08c25ea12622e2b0f8d7258bf9009df47743954ab005", "6488582913dc49220b4621f5c80816d51bda54ad59e2ea026ed99a07bac2b7e9"],
   "DIRECTORY.md": ["8fe76b708edca250f1dd575e62ab2ab51d758bde3727e5f4cffeeb27b3811e0a", "23b1bfcbdff12eca0e85cf013512a2084b303c44396142c4791767724b5b4bcb"],
   "SECURITY.md": ["d3c0e05a9b59b05fecba7919964bb5767e236bf4637578cb984bba426be452db"],
   "skills.mcps.json": ["a27b542445f5fb4744406b88364543ca31e58f3f0c73b4872f0e7a9122797f19"],
-  "strongcode.json": ["957744f1fd1bec68d0218cd358bc95a84940c7557acf8b6a76c411702d5f7d31", "733bffba3e4633a4aeeacfbeee07cfee1a38979026edb0c31ec16fd2152b65b8", "4410f3f81cd2e96628be1cfe2c1f5bb33a4a275c7ef5b60b8ac56eb99d08a38c", "f8572f1364acf862e7b9801ad736139df2798af790d966660d20b495fc661256", "0571815cce8fa3f1e06758bd5847d2bc4a845b5f3abf862ad4a626c7878c443d"],
+  "strongcode.json": ["957744f1fd1bec68d0218cd358bc95a84940c7557acf8b6a76c411702d5f7d31", "733bffba3e4633a4aeeacfbeee07cfee1a38979026edb0c31ec16fd2152b65b8", "4410f3f81cd2e96628be1cfe2c1f5bb33a4a275c7ef5b60b8ac56eb99d08a38c", "f8572f1364acf862e7b9801ad736139df2798af790d966660d20b495fc661256", "0571815cce8fa3f1e06758bd5847d2bc4a845b5f3abf862ad4a626c7878c443d", "1ebf9a41e9fad0aba15b5cb7c9dabd68190b1aa276ead2c6f1c604ba2b2d0213"],
   "strongcode.config.yaml": ["17091f5d52c5f0ef41a0d1a149a41c446b133e2c7eefef02e8de8104f7aa9dac", "35d034f0269623f5465414cba15ea9d2c50ea37810843561292406e23f4c3bcd", "2f0c5f99420b8cea0eae385b71ac295990f04f469fed2f96d785e3a5e5d695c6"],
   "categories.json": ["b042143166c9ea8bdedc9030160c46f2092a19b0f1e251fd7859e7d1b4ba8b98"],
   "models.json": ["8b4675ad4724271617af8df484fadaf22ce25c4c1e467a8c9590ac09b988c6f2"],

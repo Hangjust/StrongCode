@@ -5,6 +5,7 @@ import { CHATGPT_CODEX_ENDPOINT, refreshChatGptAccessToken, type ChatGptOAuthFet
 import { modelRequestItems, type ModelProvider, type ModelRequest, type ModelResponse, type ModelToolDefinition } from "./provider";
 import { readBoundedResponseText } from "./response-body";
 import { parseChatGptResponse } from "./chatgpt-response";
+import { promptCacheKey } from "./prompt-cache";
 
 export interface ChatGptProviderOptions {
   providerId: string;
@@ -22,11 +23,6 @@ interface WritableAuthReader extends ProviderAuthReader {
 
 function writable(store: ProviderAuthReader | undefined): store is WritableAuthReader {
   return Boolean(store && "set" in store && typeof store.set === "function");
-}
-
-function safeSessionKey(value: string): string {
-  const sanitized = value.replace(/[^A-Za-z0-9._:-]+/g, "-").slice(0, 128);
-  return sanitized || "strongcode-session";
 }
 
 function safeAccountId(value: string | undefined): string | undefined {
@@ -104,7 +100,7 @@ function requestBody(request: ModelRequest, model: string): string {
     ...(tools.length > 0 ? { tools } : {}),
     store: false,
     stream: true,
-    prompt_cache_key: safeSessionKey(request.sessionId),
+    prompt_cache_key: promptCacheKey(request.sessionId),
     include: ["reasoning.encrypted_content"],
     reasoning: { effort: "medium", summary: "auto" },
     text: { verbosity: "medium" }

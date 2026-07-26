@@ -41,6 +41,10 @@ export type InspectPathOptions = {
   readonly requireSingleLink?: boolean;
 };
 export type ReadVerifiedRegularFileOptions = { readonly maxBytes?: bigint; readonly requireSingleLink?: boolean };
+export type VerifiedRegularFileMetadata = {
+  readonly modifiedAtMs: number;
+  readonly linkCount: number;
+};
 export class PathIdentityError extends Error {
   readonly name = "PathIdentityError";
   constructor(
@@ -173,6 +177,13 @@ function finalRegularFile(receipt: PathReceipt): Extract<PathComponentIdentity, 
     throw failure("wrong-final-kind", receipt.targetPath, `Expected an existing regular file: ${receipt.targetPath}`);
   }
   return component;
+}
+export function verifiedRegularFileMetadata(receipt: PathReceipt): VerifiedRegularFileMetadata {
+  const component = finalRegularFile(receipt);
+  return Object.freeze({
+    modifiedAtMs: Number(component.mtimeNs) / 1_000_000,
+    linkCount: Number(component.nlink)
+  });
 }
 export async function verifyOpenFile(handle: FileHandle, receipt: PathReceipt): Promise<void> {
   await revalidatePath(receipt);

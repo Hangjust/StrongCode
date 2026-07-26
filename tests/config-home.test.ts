@@ -28,6 +28,7 @@ describe("StrongCode home", () => {
     expect(result.createdFiles).toContain("providers.json");
     expect(result.createdFiles).toContain("skills.mcps.json");
     expect(result.createdFiles).toContain("strongcode.config.yaml");
+    expect(result.createdFiles).toContain("config/retention.json");
     expect(await readFile(path.join(homePath, "AGENTS.md"), "utf8")).toContain("## Branch Names");
 
     const agents = JSON.parse(await readFile(path.join(homePath, "agents.json"), "utf8"));
@@ -36,7 +37,7 @@ describe("StrongCode home", () => {
     const generatedReadme = await readFile(path.join(homePath, "README.md"), "utf8");
     const generatedDirectory = STRONGCODE_HOME_EXPANDED_STARTER_FILES["DIRECTORY.md"]?.content ?? "";
 
-    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(9);
+    expect(STRONGCODE_HOME_LAYOUT_VERSION).toBe(10);
     expect(agents.generated).toBe(true);
     expect(agents.reviewOnly).toBe(true);
     expect(agents.runtimeSource).toContain("strongcode.config.yaml");
@@ -102,6 +103,10 @@ describe("StrongCode home", () => {
     expect(providers.providers.openai.baseUrl).toBe("https://api.openai.com/v1");
     expect(providers.providers.openai.apiKeyEnv).toBe("OPENAI_API_KEY");
     expect(resources.nodeModules.directory).toBe("node_modules");
+    expect(JSON.parse(await readFile(path.join(homePath, "config", "retention.json"), "utf8"))).toMatchObject({
+      version: 1,
+      cacheDays: 30
+    });
 
     for (const directory of STRONGCODE_HOME_DIRECTORIES) {
       expect((await stat(path.join(homePath, directory))).isDirectory()).toBe(true);

@@ -1,3 +1,8 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { runTui } from "../src/tui/app";
 import { commandHelpLines } from "../src/tui/ui/session-chrome";
 import { createDefaultPalette } from "../src/tui/ui/palette";
 import {
@@ -94,6 +99,66 @@ describe("slash command registry", () => {
     expect(parseSlashCommand("/computer use open Calculator")).toEqual({ command: "computer-use" });
     expect(parseSlashCommand("/computer")).toEqual({ command: "unknown", input: "/computer" });
     expect(parseSlashCommand("/computer off")).toEqual({ command: "unknown", input: "/computer off" });
+  });
+
+  it("rewrites computer-use slash input into an ordinary explicit prompt without durable command state", async () => {
+    // Given
+    const root = await mkdtemp(path.join(tmpdir(), "strongcode-computer-slash-"));
+    const home = path.join(root, "home");
+    const originalHome = process.env.STRONGCODE_HOME;
+    const originalCwd = process.cwd();
+    await writeFile(path.join(root, "strongcode.config.yaml"), `version: 1
+workspace: "."
+dataDir: ".strongcode"
+defaultAgent: tesla
+providers:
+  mock:
+    type: mock
+    displayName: Mock
+    enabled: true
+agents:
+  tesla:
+    model: mock
+    tools: []
+models:
+  mock:
+    provider: mock
+    model: mock
+    enabled: true
+permissions:
+  tools: {}
+`, "utf8");
+    process.env.STRONGCODE_HOME = home;
+    process.chdir(root);
+
+    try {
+      const input = new PassThrough();
+      const output = new PassThrough();
+      let outputData = "";
+      output.on("data", chunk => {
+        outputData += chunk;
+      });
+      const finished = runTui(input, output);
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      // When
+      for (const line of ["/computer use open Calculator", "Inspect this repository", "/exit"]) {
+        input.write(`${line}\n`);
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      input.end();
+      await finished;
+
+      // Then
+      expect(outputData).toContain("Mock response: Use the computer to open Calculator");
+      expect(outputData).toContain("Mock response: Inspect this repository");
+      expect(outputData).not.toContain("Mock response: /computer use");
+    } finally {
+      process.chdir(originalCwd);
+      if (originalHome === undefined) delete process.env.STRONGCODE_HOME;
+      else process.env.STRONGCODE_HOME = originalHome;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("preserves unknown slash input for the caller", () => {

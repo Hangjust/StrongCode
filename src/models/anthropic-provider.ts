@@ -173,6 +173,7 @@ export class AnthropicModelProvider implements ModelProvider {
     const body = stringifyNativeProviderBody({
       model: this.options.modelConfig.model ?? this.options.modelId,
       max_tokens: modelMaxTokens(this.options.modelConfig.options),
+      cache_control: { type: "ephemeral" },
       messages: toAnthropicMessages(request),
       ...(request.systemPrompt ? { system: request.systemPrompt } : {}),
       ...(request.tools.length > 0 ? {

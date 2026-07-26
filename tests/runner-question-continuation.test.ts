@@ -112,7 +112,7 @@ describe("runner question continuation", () => {
     await pendingQuestion;
     await Promise.all([runner.close(), runner.close()]);
 
-    expect(completedResult?.ok).toBe(false);
+    expect(completedResult).toMatchObject({ ok: false, error: { code: "MODEL_ERROR" } });
     expect(closeCalls).toBe(1);
     expect(requests).toHaveLength(1);
     const session = await harness.sessions.read("closing");
@@ -124,6 +124,16 @@ describe("runner question continuation", () => {
         expect.objectContaining({
           type: "conversation_item",
           item: expect.objectContaining({ type: "tool_call", callId: "call-question-close" })
+        }),
+        expect.objectContaining({
+          type: "conversation_item",
+          item: {
+            type: "tool_result",
+            role: "tool",
+            callId: "call-question-close",
+            content: "Tool interrupted [MODEL_ERROR]: execution may have completed, but no reliable result was recorded; StrongCode will not retry it automatically.",
+            isError: true
+          }
         })
       ]);
     }

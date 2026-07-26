@@ -251,6 +251,66 @@ describe("MCP runtime", () => {
     }
   });
 
+  it("builds fresh immutable web-search descriptions in configured visible fallback order", async () => {
+    // Given
+    const workspace = await trackedWorkspace();
+    await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
+      version: 1,
+      mcpServers: {
+        open_computer_use: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["ocu-package-must-not-launch"]
+        },
+        safe_alpha: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["safe-alpha-must-not-launch"]
+        },
+        safe_zeta: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["safe-zeta-must-not-launch"]
+        }
+      },
+      webSearch: {
+        providers: [
+          { server: "open_computer_use", tool: "search", queryParameter: "query", enabled: true },
+          { server: "safe_zeta", tool: "search", queryParameter: "query", enabled: true },
+          { server: "safe_alpha", tool: "search", queryParameter: "query", enabled: true }
+        ]
+      }
+    }), "utf8");
+    const registry = await createRuntimeToolRegistry(workspace.context);
+
+    try {
+      const search = registry.get("web_search");
+      if (!search) throw new Error("web_search was not registered");
+
+      // When
+      const ordinaryView = search.modelView?.(workspace.context);
+      const repeatedOrdinaryView = search.modelView?.(workspace.context);
+      const explicitView = search.modelView?.(withComputerUseEnabled(workspace.context));
+
+      // Then
+      expect(ordinaryView?.description).toBe(
+        "Search the current web with automatic provider fallback (safe_zeta -> safe_alpha)."
+      );
+      expect(explicitView?.description).toBe(
+        "Search the current web with automatic provider fallback (open_computer_use -> safe_zeta -> safe_alpha)."
+      );
+      expect(repeatedOrdinaryView).not.toBe(ordinaryView);
+      expect(Object.isFrozen(ordinaryView)).toBe(true);
+      expect(Object.isFrozen(repeatedOrdinaryView)).toBe(true);
+      expect(Object.isFrozen(explicitView)).toBe(true);
+    } finally {
+      await registry.close();
+    }
+  });
+
   it("calls stdio MCP tools through direct and permitted generic routes plus the web fallback route", async () => {
     const workspace = await trackedWorkspace();
     const fixture = path.join(process.cwd(), "tests", "fixtures", "mcp-echo.cjs");

@@ -33,8 +33,41 @@ const SLASH_REWRITTEN_PROMPT = "Use the computer to open Calculator";
 const SAFE_SERVER_IDS = ["safe_alpha", "safe_zeta"] as const;
 const EXPLICIT_SERVER_IDS = ["desktop_control", "open_computer_use", ...SAFE_SERVER_IDS] as const;
 const CONCURRENT_VIEW_REPETITIONS = 12;
+const OCU_SERVER_FIXTURE = {
+  enabled: true,
+  autoStart: false,
+  type: "local",
+  command: ["ocu-package-must-not-launch"]
+} as const;
+const SAFE_SEARCH_SERVER_FIXTURE = {
+  enabled: true,
+  autoStart: false,
+  type: "local",
+  command: ["safe-provider-must-not-launch"]
+} as const;
+const OCU_SEARCH_PROVIDER = {
+  server: "open_computer_use",
+  tool: "search",
+  queryParameter: "query",
+  enabled: true
+} as const;
+const SAFE_SEARCH_PROVIDER = {
+  server: "safe_search",
+  tool: "search",
+  queryParameter: "query",
+  enabled: true
+} as const;
 const roots = new Set<string>();
 const activeRoots = new Set<string>();
+
+type WebSearchProviderFixture = {
+  readonly server: string;
+  readonly tool: string;
+  readonly queryParameter: string;
+  readonly enabled: boolean;
+};
+
+type SearchOutcome = string | StrongCodeError;
 
 async function trackedContinuationHarness(toolNames: readonly string[]): Promise<Awaited<ReturnType<typeof createContinuationHarness>>> {
   const harness = await createContinuationHarness(toolNames);
@@ -50,7 +83,10 @@ async function trackedWorkspace(): Promise<Awaited<ReturnType<typeof tempWorkspa
   return workspace;
 }
 
-function observedManagerFactory(activity: string[]): NonNullable<RuntimeToolRegistryOptions["managerFactory"]> {
+function observedManagerFactory(
+  activity: string[],
+  searchOutcomes: Readonly<Record<string, SearchOutcome>> = {}
+): NonNullable<RuntimeToolRegistryOptions["managerFactory"]> {
   return (context, config) => {
     const manager = new McpManager(context, config);
     const listTools = manager.listTools.bind(manager);
@@ -61,6 +97,9 @@ function observedManagerFactory(activity: string[]): NonNullable<RuntimeToolRegi
     });
     vi.spyOn(manager, "callTool").mockImplementation(async (serverId, toolName, args, invocationContext) => {
       activity.push(`invocation:${serverId}:${toolName}`);
+      const outcome = searchOutcomes[serverId];
+      if (outcome instanceof StrongCodeError) throw outcome;
+      if (outcome !== undefined) return outcome;
       return callTool(serverId, toolName, args, invocationContext);
     });
     vi.spyOn(manager, "connect").mockImplementation(async serverId => {
@@ -71,11 +110,17 @@ function observedManagerFactory(activity: string[]): NonNullable<RuntimeToolRegi
   };
 }
 
-async function trackedGatewayHarness(mcpServers: Readonly<Record<string, unknown>>) {
+async function trackedGatewayHarness(
+  mcpServers: Readonly<Record<string, unknown>>,
+  webSearchProviders: readonly WebSearchProviderFixture[] = [],
+  searchOutcomes: Readonly<Record<string, SearchOutcome>> = {}
+) {
   const harness = await trackedContinuationHarness([
     "mcp_call",
     "mcp_list_tools",
+    "web_search",
     "mcp__safe_alpha__*",
+    "mcp__safe_search__*",
     "mcp__safe_server__*",
     "mcp__safe_zeta__*",
     "mcp__open_computer_use__*",
@@ -88,11 +133,12 @@ async function trackedGatewayHarness(mcpServers: Readonly<Record<string, unknown
       timeout: { startupMs: 5000, requestMs: 5000 },
       environment: { inherit: false, allowlist: [] }
     },
-    mcpServers
+    mcpServers,
+    webSearch: { providers: webSearchProviders }
   }), "utf8");
   const managerActivity: string[] = [];
   const registry = await createRuntimeToolRegistry(harness.context, {
-    managerFactory: observedManagerFactory(managerActivity)
+    managerFactory: observedManagerFactory(managerActivity, searchOutcomes)
   });
   return { ...harness, registry, managerActivity };
 }
@@ -111,6 +157,12 @@ function expectGatewayServerView(request: ModelRequest | undefined, serverIds: r
       properties: { server: { enum: serverIds } }
     });
   }
+}
+
+function requireWebSearchDescription(request: ModelRequest | undefined): string {
+  const definition = request?.toolDefinitions?.find(candidate => candidate.name === "web_search");
+  if (!definition) throw new Error("web_search definition was not projected");
+  return definition.description;
 }
 
 afterEach(async () => {
@@ -302,6 +354,208 @@ describe("computer-use gating", () => {
     if (!result.ok) throw result.error;
     expect(requests[0]?.tools).toEqual(["helper"]);
     expectSynchronizedToolMetadata(requests);
+  });
+
+  it.each([
+    { label: "ordinary primary", prompt: ORDINARY_PROMPT, runtimeRole: "primary" as const },
+    { label: "delegated explicit text", prompt: EXPLICIT_PROMPT, runtimeRole: "child" as const, taskId: "delegated-web-search" }
+  ])("removes computer-only web search from $label definitions and admission", async ({ label, prompt, runtimeRole, taskId }) => {
+    // Given
+    const harness = await trackedGatewayHarness(
+      { open_computer_use: OCU_SERVER_FIXTURE },
+      [OCU_SEARCH_PROVIDER],
+      { open_computer_use: "unexpected OCU result" }
+    );
+    const requests: ModelRequest[] = [];
+    const model = scriptedProvider([
+      {
+        message: "",
+        toolCalls: [{ callId: `hidden-search-${label}`, name: "web_search", input: { query: "must not run" } }]
+      },
+      { message: "must not continue", toolCalls: [] }
+    ], requests);
+    const runner = new AgentRunner(
+      {
+        ...harness.context,
+        ...(taskId === undefined ? {} : { taskId }),
+        effectivePermissions: { ...harness.context.config.permissions.tools }
+      },
+      harness.sessions,
+      harness.registry
+    );
+    const agent = { ...continuationAgent(harness.config, model), runtimeRole };
+
+    try {
+      // When
+      const result = await runner.run(agent, prompt, `computer-only-web-search-${label.replaceAll(" ", "-")}`);
+
+      // Then
+      expect(result).toMatchObject({ ok: false, error: { code: "PERMISSION_DENIED" } });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.tools).toEqual([]);
+      expect(requests[0]?.toolDefinitions).toEqual([]);
+      expect(harness.managerActivity).toEqual([]);
+    } finally {
+      await harness.registry.close();
+    }
+  });
+
+  it("skips an OCU-first route and uses the safe fallback on an ordinary turn", async () => {
+    // Given
+    const harness = await trackedGatewayHarness(
+      {
+        open_computer_use: OCU_SERVER_FIXTURE,
+        safe_search: SAFE_SEARCH_SERVER_FIXTURE
+      },
+      [OCU_SEARCH_PROVIDER, SAFE_SEARCH_PROVIDER],
+      {
+        open_computer_use: new StrongCodeError("PERMISSION_DENIED", "OCU must be skipped"),
+        safe_search: "safe marker"
+      }
+    );
+    const requests: ModelRequest[] = [];
+    const model = scriptedProvider([
+      {
+        message: "",
+        toolCalls: [{ callId: "ordinary-safe-fallback", name: "web_search", input: { query: "current docs" } }]
+      },
+      { message: "Safe search complete", toolCalls: [] }
+    ], requests);
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry);
+
+    try {
+      // When
+      const result = await runner.run(
+        continuationAgent(harness.config, model),
+        ORDINARY_PROMPT,
+        "ordinary-web-search-fallback"
+      );
+
+      // Then
+      if (!result.ok) throw result.error;
+      expect(result.value.response).toBe("Safe search complete");
+      expect(result.value.toolExecutions).toEqual([{
+        tool: "web_search",
+        input: { query: "current docs" },
+        output: "[provider: safe_search]\nsafe marker"
+      }]);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(requireWebSearchDescription(request)).toBe(
+          "Search the current web with automatic provider fallback (safe_search)."
+        );
+        expect(JSON.stringify(request.toolDefinitions)).not.toContain("open_computer_use");
+      }
+      expect(harness.managerActivity).toEqual(["invocation:safe_search:search"]);
+    } finally {
+      await harness.registry.close();
+    }
+  });
+
+  it("collects visible provider failures in configured order without touching hidden OCU", async () => {
+    // Given
+    const harness = await trackedGatewayHarness(
+      {
+        open_computer_use: OCU_SERVER_FIXTURE,
+        safe_zeta: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["safe-zeta-must-not-launch"]
+        },
+        safe_alpha: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["safe-alpha-must-not-launch"]
+        }
+      },
+      [
+        OCU_SEARCH_PROVIDER,
+        { server: "safe_zeta", tool: "search", queryParameter: "query", enabled: true },
+        { server: "safe_alpha", tool: "search", queryParameter: "query", enabled: true }
+      ],
+      {
+        open_computer_use: new StrongCodeError("PERMISSION_DENIED", "OCU must remain hidden"),
+        safe_zeta: new StrongCodeError("TOOL_ERROR", "zeta unavailable"),
+        safe_alpha: new StrongCodeError("TOOL_ERROR", "alpha unavailable")
+      }
+    );
+
+    try {
+      const search = harness.registry.get("web_search");
+      if (!search) throw new Error("web_search was not registered");
+
+      // When
+      const result = await search.execute({ query: "current docs" }, harness.context);
+
+      // Then
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "TOOL_ERROR",
+          message: "All web-search providers failed:\nsafe_zeta: zeta unavailable\nsafe_alpha: alpha unavailable"
+        }
+      });
+      expect(search.modelView?.(harness.context)?.description).toBe(
+        "Search the current web with automatic provider fallback (safe_zeta -> safe_alpha)."
+      );
+      expect(harness.managerActivity).toEqual([
+        "invocation:safe_zeta:search",
+        "invocation:safe_alpha:search"
+      ]);
+    } finally {
+      await harness.registry.close();
+    }
+  });
+
+  it("projects and uses the OCU-first web route for an explicit primary turn", async () => {
+    // Given
+    const harness = await trackedGatewayHarness(
+      {
+        open_computer_use: OCU_SERVER_FIXTURE,
+        safe_search: SAFE_SEARCH_SERVER_FIXTURE
+      },
+      [OCU_SEARCH_PROVIDER, SAFE_SEARCH_PROVIDER],
+      { open_computer_use: "explicit OCU marker", safe_search: "unexpected safe marker" }
+    );
+    const requests: ModelRequest[] = [];
+    const model = scriptedProvider([
+      {
+        message: "",
+        toolCalls: [{ callId: "explicit-ocu-search", name: "web_search", input: { query: "open Calculator" } }]
+      },
+      { message: "Explicit search complete", toolCalls: [] }
+    ], requests);
+    const runner = new AgentRunner(harness.context, harness.sessions, harness.registry);
+
+    try {
+      // When
+      const result = await runner.run(
+        continuationAgent(harness.config, model),
+        EXPLICIT_PROMPT,
+        "explicit-web-search-route"
+      );
+
+      // Then
+      if (!result.ok) throw result.error;
+      expect(result.value.toolExecutions).toEqual([{
+        tool: "web_search",
+        input: { query: "open Calculator" },
+        output: "[provider: open_computer_use]\nexplicit OCU marker"
+      }]);
+      expect(requireWebSearchDescription(requests[0])).toBe(
+        "Search the current web with automatic provider fallback (open_computer_use -> safe_search)."
+      );
+      expect(harness.registry.get("web_search")?.modelView?.(
+        withComputerUseEnabled(harness.context)
+      )?.description).toBe(
+        "Search the current web with automatic provider fallback (open_computer_use -> safe_search)."
+      );
+      expect(harness.managerActivity).toEqual(["invocation:open_computer_use:search"]);
+    } finally {
+      await harness.registry.close();
+    }
   });
 
   it("projects generic MCP metadata from the ordered servers visible in each turn", async () => {

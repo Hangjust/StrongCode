@@ -2,7 +2,7 @@ import path from "node:path";
 import { z } from "zod";
 import { StrongCodeError } from "../core/errors";
 import { err, ok } from "../core/result";
-import type { RuntimeContext } from "../runtime/context";
+import type { RuntimeContext, ToolInvocationContext } from "../runtime/context";
 import { createDefaultToolRegistry, ToolRegistry } from "../tools/registry";
 import { assertToolAllowed } from "../tools/permissions";
 import { isDelegationToolName } from "../tools/child-policy";
@@ -137,13 +137,26 @@ function gatewayTools(manager: McpManager): Tool[] {
   ];
 }
 
+type WebSearchProvider = McpConfig["webSearch"]["providers"][number];
+
+function visibleWebSearchProviders(
+  manager: McpManager,
+  context: ToolInvocationContext
+): readonly WebSearchProvider[] {
+  const visibleServerIds = new Set(manager.serverIds(context));
+  return Object.freeze(manager.config.webSearch.providers.filter(provider => (
+    provider.enabled && visibleServerIds.has(provider.server)
+  )));
+}
+
 function webSearchTool(manager: McpManager): Tool | undefined {
-  const providers = manager.config.webSearch.providers.filter(provider => provider.enabled);
-  if (providers.length === 0) return undefined;
+  if (!manager.config.webSearch.providers.some(provider => provider.enabled)) return undefined;
   return {
     name: "web_search",
-    description: `Search the current web with automatic provider fallback (${providers.map(provider => provider.server).join(" -> ")}).`,
-    effect: providers.every(provider => isAuditedWebSearchRoute(manager.config, provider)) ? "read-only-web" : "unclassified",
+    description: "Search the current web with automatic provider fallback.",
+    effect: manager.config.webSearch.providers.every(provider => (
+      !provider.enabled || isAuditedWebSearchRoute(manager.config, provider)
+    )) ? "read-only-web" : "unclassified",
     inputSchema: searchInputSchema,
     inputJsonSchema: {
       type: "object",
@@ -151,10 +164,24 @@ function webSearchTool(manager: McpManager): Tool | undefined {
       required: ["query"],
       additionalProperties: false
     },
+    modelView(context) {
+      const providers = visibleWebSearchProviders(manager, context);
+      if (providers.length === 0) return undefined;
+      return Object.freeze({
+        description: `Search the current web with automatic provider fallback (${providers.map(provider => provider.server).join(" -> ")}).`
+      });
+    },
     readOnly: true,
     async execute(input, context) {
       const parsed = searchInputSchema.safeParse(input);
       if (!parsed.success) return err(new StrongCodeError("VALIDATION_ERROR", parsed.error.message));
+      const providers = visibleWebSearchProviders(manager, context);
+      if (providers.length === 0) {
+        return err(new StrongCodeError(
+          "PERMISSION_DENIED",
+          "No web-search providers are visible in the current turn"
+        ));
+      }
       const failures: string[] = [];
       for (const provider of providers) {
         const nestedToolName = namespacedMcpToolName(provider.server, provider.tool);

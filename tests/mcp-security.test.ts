@@ -175,6 +175,95 @@ describe("MCP startup security", () => {
     }
   });
 
+  it("fails closed before launching a computer-only web-search provider with no visible route", async () => {
+    // Given
+    const workspace = await trackedWorkspace();
+    const marker = path.join(workspace.root, "computer-only-web-search.cwd");
+    workspace.config.permissions.tools.web_search = "allow";
+    workspace.config.permissions.tools["mcp__desktop_control__*"] = "allow";
+    await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
+      version: 1,
+      mcpServers: {
+        desktop_control: {
+          enabled: true,
+          autoStart: true,
+          type: "local",
+          command: [process.execPath, fixture, marker, "open-computer-use@0.2.0"]
+        }
+      },
+      webSearch: {
+        providers: [{ server: "desktop_control", tool: "search", queryParameter: "query", enabled: true }]
+      }
+    }), "utf8");
+    const registry = await createRuntimeToolRegistry(workspace.context);
+
+    try {
+      const search = registry.get("web_search");
+      if (!search) throw new Error("web_search was not registered");
+
+      // When
+      const result = await search.execute({ query: "must not run" }, workspace.context);
+
+      // Then
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "PERMISSION_DENIED",
+          message: "No web-search providers are visible in the current turn"
+        }
+      });
+      await expectMarkerMissing(marker);
+    } finally {
+      await registry.close();
+    }
+  });
+
+  it("keeps a mixed web route unclassified when an ordinary view hides its unsafe provider", async () => {
+    // Given
+    const workspace = await trackedWorkspace();
+    await writeFile(path.join(workspace.root, "mcp.json"), JSON.stringify({
+      version: 1,
+      mcpServers: {
+        desktop_control: {
+          enabled: true,
+          autoStart: false,
+          type: "local",
+          command: ["npx", "open-computer-use@0.2.0", "mcp"]
+        },
+        exa: {
+          enabled: true,
+          autoStart: false,
+          type: "remote",
+          url: "https://mcp.exa.ai/mcp"
+        }
+      },
+      webSearch: {
+        providers: [
+          { server: "desktop_control", tool: "search", queryParameter: "query", enabled: true },
+          { server: "exa", tool: "web_search_exa", queryParameter: "query", enabled: true }
+        ]
+      }
+    }), "utf8");
+    const registry = await createRuntimeToolRegistry(workspace.context);
+
+    try {
+      const search = registry.get("web_search");
+      if (!search) throw new Error("web_search was not registered");
+
+      // When
+      const ordinaryView = search.modelView?.(workspace.context);
+
+      // Then
+      expect(search.effect).toBe("unclassified");
+      expect(ordinaryView?.description).toBe(
+        "Search the current web with automatic provider fallback (exa)."
+      );
+      expect(JSON.stringify(ordinaryView)).not.toContain("desktop_control");
+    } finally {
+      await registry.close();
+    }
+  });
+
   it("uses the canonical workspace root when workingDirectory is omitted", async () => {
     // Given
     const workspace = await trackedWorkspace();

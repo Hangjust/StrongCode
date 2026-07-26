@@ -1,10 +1,11 @@
 import { z } from "zod";
 import type { Agent } from "../src/agents/agent";
 import { StrongCodeError } from "../src/core/errors";
-import { ok } from "../src/core/result";
+import { err, ok, type Result } from "../src/core/result";
 import type { ModelProvider, ModelRequest, ModelResponse } from "../src/models/provider";
 import { QuestionBroker, type PendingQuestion } from "../src/questions/broker";
 import type { ToolInvocationContext } from "../src/runtime/context";
+import type { ConversationSessionEvent } from "../src/sessions/session";
 import { SessionStore } from "../src/sessions/session-store";
 import { ToolRegistry } from "../src/tools/registry";
 import type { Tool } from "../src/tools/tool";
@@ -45,6 +46,37 @@ export async function createContinuationHarness(toolNames: readonly string[]): P
     sessions: new SessionStore(workspace.context.dataDir),
     registry: new ToolRegistry()
   };
+}
+
+type AppendFaultOptions = {
+  readonly failAt: number;
+  readonly message: string;
+  readonly afterSuccessfulAppend?: (attempt: {
+    readonly invocation: number;
+    readonly event: ConversationSessionEvent;
+  }) => void;
+};
+
+export class OneShotAppendFaultSessionStore extends SessionStore {
+  private readonly observedAppends: ConversationSessionEvent[] = [];
+
+  constructor(dataDir: string, private readonly fault: AppendFaultOptions) {
+    super(dataDir);
+  }
+
+  get appendAttempts(): readonly ConversationSessionEvent[] {
+    return this.observedAppends;
+  }
+
+  override async append(sessionId: string, event: ConversationSessionEvent): Promise<Result<void>> {
+    const invocation = this.observedAppends.push(event);
+    if (invocation === this.fault.failAt) {
+      return err(new StrongCodeError("SESSION_ERROR", this.fault.message));
+    }
+    const appended = await super.append(sessionId, event);
+    if (appended.ok) this.fault.afterSuccessfulAppend?.({ invocation, event });
+    return appended;
+  }
 }
 
 export function scriptedProvider(responses: readonly ModelResponse[], requests: ModelRequest[]): ModelProvider {

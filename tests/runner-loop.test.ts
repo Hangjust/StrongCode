@@ -2,17 +2,16 @@ import type { Agent } from "../src/agents/agent";
 import { AgentRunner } from "../src/agents/runner";
 import { resolveRunnerLoopLimits } from "../src/agents/runner-loop-limits";
 import { StrongCodeError, type StrongCodeErrorCode } from "../src/core/errors";
-import { err, type Result } from "../src/core/result";
+import { err } from "../src/core/result";
 import type { ModelProvider, ModelRequest, ModelResponse } from "../src/models/provider";
 import type { RuntimeEventType } from "../src/runtime/events";
-import type { ConversationSessionEvent } from "../src/sessions/session";
 import type { AttemptCreatedEvent } from "../src/sessions/session-ledger-events";
-import { SessionStore } from "../src/sessions/session-store";
 import type { Tool } from "../src/tools/tool";
 import {
   continuationAgent,
   continuationTool,
   createContinuationHarness,
+  OneShotAppendFaultSessionStore,
   scriptedProvider
 } from "./runner-continuation-fixtures";
 
@@ -32,20 +31,6 @@ function failingTool(name: string, code: StrongCodeErrorCode, executions?: strin
       return err(new StrongCodeError(code, `${name} failed`));
     }
   };
-}
-
-class TerminalResultFailingSessionStore extends SessionStore {
-  resultAppendAttempts = 0;
-
-  override async append(sessionId: string, event: ConversationSessionEvent): Promise<Result<void>> {
-    if (event.type === "conversation_item"
-      && event.item.type === "tool_result"
-      && event.item.callId === "terminal-beta") {
-      this.resultAppendAttempts += 1;
-      return err(new StrongCodeError("SESSION_ERROR", "Injected terminal result append failure"));
-    }
-    return super.append(sessionId, event);
-  }
 }
 
 describe("AgentRunner bounded model-tool loop", () => {
@@ -419,12 +404,142 @@ describe("AgentRunner bounded model-tool loop", () => {
     ]);
   });
 
+  it("settles only calls whose response-item append succeeded", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const executions: string[] = [];
+    const sessions = new OneShotAppendFaultSessionStore(harness.context.dataDir, {
+      failAt: 3,
+      message: "Injected beta call append failure"
+    });
+    harness.registry.register(continuationTool("alpha", "must not run", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "persisted-alpha", name: "alpha", input: {} },
+        { callId: "failed-beta", name: "beta", input: {} },
+        { callId: "unattempted-gamma", name: "gamma", input: {} }
+      ]
+    }], []);
+    const runner = new AgentRunner(harness.context, sessions, harness.registry, GENEROUS_LIMITS);
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "partial-call-append");
+    const stored = await sessions.read("partial-call-append");
+
+    // Then
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "SESSION_ERROR", message: "Injected beta call append failure" }
+    });
+    expect(executions).toEqual([]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_call" ? [event.item.callId] : []
+    ))).toEqual(["persisted-alpha", "failed-beta"]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["persisted-alpha"]);
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_call" ? [event.item.callId] : []
+    ))).toEqual(["persisted-alpha"]);
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item] : []
+    ))).toEqual([{
+      type: "tool_result",
+      role: "tool",
+      callId: "persisted-alpha",
+      content: "Tool skipped [SESSION_ERROR]: the batch stopped after a terminal failure; this tool did not run.",
+      isError: true
+    }]);
+  });
+
+  it.each([
+    { interruption: "cancellation", code: "CANCELLED" },
+    { interruption: "close", code: "MODEL_ERROR" }
+  ] as const)("settles the persisted subset on $interruption between response-item appends", async ({
+    interruption,
+    code
+  }) => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta"]);
+    const controller = new AbortController();
+    const executions: string[] = [];
+    let closeRunner: (() => void) | undefined;
+    let closePromise: Promise<void> | undefined;
+    const sessions = new OneShotAppendFaultSessionStore(harness.context.dataDir, {
+      failAt: 99,
+      message: "Unused append fault",
+      afterSuccessfulAppend: ({ invocation }) => {
+        if (invocation !== 2) return;
+        switch (interruption) {
+          case "cancellation":
+            controller.abort();
+            break;
+          case "close":
+            closeRunner?.();
+            break;
+          default: {
+            const exhaustiveInterruption: never = interruption;
+            return exhaustiveInterruption;
+          }
+        }
+      }
+    });
+    harness.registry.register(continuationTool("alpha", "must not run", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: `${interruption}-alpha`, name: "alpha", input: {} },
+        { callId: `${interruption}-beta`, name: "beta", input: {} }
+      ]
+    }], []);
+    const runner = new AgentRunner(
+      { ...harness.context, signal: controller.signal },
+      sessions,
+      harness.registry,
+      GENEROUS_LIMITS
+    );
+    closeRunner = () => {
+      closePromise = runner.close();
+    };
+
+    // When
+    const result = await runner.run(
+      continuationAgent(harness.config, model),
+      "Start",
+      `${interruption}-during-response-append`
+    );
+    if (closePromise !== undefined) await closePromise;
+    const stored = await sessions.read(`${interruption}-during-response-append`);
+
+    // Then
+    expect(result).toMatchObject({ ok: false, error: { code } });
+    expect(executions).toEqual([]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_call" ? [event.item.callId] : []
+    ))).toEqual([`${interruption}-alpha`]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual([`${interruption}-alpha`]);
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual([`${interruption}-alpha`]);
+  });
+
   it("returns a settlement append failure without retrying the append", async () => {
     // Given
     const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
     const executions: string[] = [];
     const requests: ModelRequest[] = [];
-    const sessions = new TerminalResultFailingSessionStore(harness.context.dataDir);
+    const sessions = new OneShotAppendFaultSessionStore(harness.context.dataDir, {
+      failAt: 6,
+      message: "Injected terminal result append failure"
+    });
     harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
     harness.registry.register(failingTool("beta", "PERMISSION_DENIED", executions));
     harness.registry.register(continuationTool("gamma", "must not run", executions));
@@ -440,15 +555,71 @@ describe("AgentRunner bounded model-tool loop", () => {
 
     // When
     const result = await runner.run(continuationAgent(harness.config, model), "Start", "terminal-append-failure");
+    const stored = await sessions.read("terminal-append-failure");
 
     // Then
     expect(result).toMatchObject({
       ok: false,
       error: { code: "SESSION_ERROR", message: "Injected terminal result append failure" }
     });
-    expect(sessions.resultAppendAttempts).toBe(1);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["terminal-alpha", "terminal-beta", "terminal-gamma"]);
     expect(requests).toHaveLength(1);
     expect(executions).toEqual(["alpha", "beta"]);
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["terminal-alpha", "terminal-gamma"]);
+  });
+
+  it("does not retry a failed sibling settlement and settles only untouched calls", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const controller = new AbortController();
+    const executions: string[] = [];
+    const sessions = new OneShotAppendFaultSessionStore(harness.context.dataDir, {
+      failAt: 6,
+      message: "Injected second sibling settlement failure",
+      afterSuccessfulAppend: ({ invocation }) => {
+        if (invocation === 4) controller.abort();
+      }
+    });
+    harness.registry.register(continuationTool("alpha", "must not run", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const model = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "settlement-alpha", name: "alpha", input: {} },
+        { callId: "settlement-beta", name: "beta", input: {} },
+        { callId: "settlement-gamma", name: "gamma", input: {} }
+      ]
+    }], []);
+    const runner = new AgentRunner(
+      { ...harness.context, signal: controller.signal },
+      sessions,
+      harness.registry,
+      GENEROUS_LIMITS
+    );
+
+    // When
+    const result = await runner.run(continuationAgent(harness.config, model), "Start", "partial-settlement");
+    const stored = await sessions.read("partial-settlement");
+
+    // Then
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "SESSION_ERROR", message: "Injected second sibling settlement failure" }
+    });
+    expect(executions).toEqual([]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["settlement-alpha", "settlement-beta", "settlement-gamma"]);
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["settlement-alpha", "settlement-gamma"]);
   });
 
   it.each([

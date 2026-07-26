@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { PublicProviderError, StrongCodeError, toStrongCodeError } from "../core/errors";
 import { err, ok, type Result } from "../core/result";
-import { validateConversationItems, type ConversationItem, type ToolExecution } from "../core/types";
+import {
+  validateConversationItems,
+  type ConversationItem,
+  type ConversationToolCallItem,
+  type ToolExecution
+} from "../core/types";
 import type { ModelResponse, ModelToolDefinition } from "../models/provider";
 import type { RuntimeEventSink } from "../runtime/events";
 import type { ToolInvocationContext } from "../runtime/context";
@@ -22,8 +27,8 @@ import {
   type RunnerLoopState
 } from "./runner-loop-limits";
 import { cancelledError, RunnerCommitProtocol, runnerInterruption } from "./runner-outcome";
-import { admitToolBatch } from "./runner-tool-batch";
-import { executeToolBatch } from "./runner-tool-execution";
+import { admitToolBatch, type AdmittedToolCall } from "./runner-tool-batch";
+import { executeToolBatch, settleSkippedToolCalls } from "./runner-tool-execution";
 
 export type RunnerLoopCompletion = {
   readonly assistantText: string;
@@ -170,6 +175,23 @@ export async function runModelToolLoop(input: RunnerLoopInput): Promise<Result<R
       });
     }
 
+    const persistedCalls: AdmittedToolCall<ConversationToolCallItem>[] = [];
+    const settlementAttempts = new Set<ConversationToolCallItem["callId"]>();
+    const settlementInput = {
+      sessions: input.sessions,
+      sessionId: input.sessionId,
+      agentId: input.agent.name,
+      transcript,
+      onSettlementAttempt: (callId: ConversationToolCallItem["callId"]) => {
+        settlementAttempts.add(callId);
+      }
+    };
+    const settlePersistedCalls = async (failure: StrongCodeError): Promise<Result<RunnerLoopCompletion>> => {
+      const untouchedCalls = persistedCalls.filter(({ call }) => !settlementAttempts.has(call.callId));
+      const settled = await settleSkippedToolCalls(settlementInput, untouchedCalls, failure.code);
+      return settled.ok ? err(failure) : settled;
+    };
+
     if (recording !== undefined) {
       const recorded = await recording;
       if (!recorded.ok) return err(new StrongCodeError("SESSION_ERROR", "Primary telemetry recording failed"));
@@ -177,14 +199,19 @@ export async function runModelToolLoop(input: RunnerLoopInput): Promise<Result<R
     }
 
     for (const item of turn.items) {
-      if (input.context.signal?.aborted) return err(cancelledError());
-      if (input.isClosed()) return err(new StrongCodeError("MODEL_ERROR", "Agent runner is closed"));
+      if (input.context.signal?.aborted) return settlePersistedCalls(cancelledError());
+      if (input.isClosed()) {
+        return settlePersistedCalls(new StrongCodeError("MODEL_ERROR", "Agent runner is closed"));
+      }
       const event = item.type === "text"
         ? messageEvent("assistant", item.content, input.agent.name)
         : conversationItemEvent(item, input.agent.name);
       const appended = await input.sessions.append(input.sessionId, event);
-      if (!appended.ok) return appended;
+      if (!appended.ok) return settlePersistedCalls(appended.error);
       transcript.push(item);
+      if (item.type === "tool_call") {
+        persistedCalls.push(...admitted.value.filter(({ call }) => call.callId === item.callId));
+      }
     }
 
     const executed = await executeToolBatch({
@@ -195,9 +222,10 @@ export async function runModelToolLoop(input: RunnerLoopInput): Promise<Result<R
       agentId: input.agent.name,
       emit: input.emit,
       transcript,
+      onSettlementAttempt: settlementInput.onSettlementAttempt,
       isClosed: input.isClosed
     });
-    if (!executed.ok) return executed;
+    if (!executed.ok) return settlePersistedCalls(executed.error);
     toolExecutions.push(...executed.value);
   }
 }

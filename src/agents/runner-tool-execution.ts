@@ -14,14 +14,18 @@ import type { ToolResult } from "../tools/tool";
 import type { AdmittedToolCall } from "./runner-tool-batch";
 import { cancelledError, isTerminalToolFailure, recoverableToolFailureContent } from "./runner-outcome";
 
-type ToolExecutionBatchInput = {
-  readonly calls: readonly AdmittedToolCall<ConversationToolCallItem>[];
-  readonly context: ToolInvocationContext;
+export type ToolSettlementInput = {
   readonly sessions: SessionStore;
   readonly sessionId: string;
   readonly agentId: string;
-  readonly emit: RuntimeEventSink;
   readonly transcript: ConversationItem[];
+  readonly onSettlementAttempt: (callId: ConversationToolCallItem["callId"]) => void;
+};
+
+type ToolExecutionBatchInput = ToolSettlementInput & {
+  readonly calls: readonly AdmittedToolCall<ConversationToolCallItem>[];
+  readonly context: ToolInvocationContext;
+  readonly emit: RuntimeEventSink;
   readonly isClosed: () => boolean;
 };
 
@@ -36,7 +40,7 @@ type ToolInterruption = {
   readonly error: StrongCodeError;
 };
 
-async function settleToolCall(input: ToolExecutionBatchInput, settlement: ToolSettlement): Promise<Result<void>> {
+async function settleToolCall(input: ToolSettlementInput, settlement: ToolSettlement): Promise<Result<void>> {
   const resultItem: ConversationToolResultItem = Object.freeze({
     type: "tool_result",
     role: "tool",
@@ -44,6 +48,7 @@ async function settleToolCall(input: ToolExecutionBatchInput, settlement: ToolSe
     content: settlement.content,
     isError: settlement.isError
   });
+  input.onSettlementAttempt(settlement.callId);
   const appended = await input.sessions.append(
     input.sessionId,
     conversationItemEvent(resultItem, input.agentId)
@@ -60,8 +65,8 @@ function toolInterruption(input: ToolExecutionBatchInput): ToolInterruption | un
     : undefined;
 }
 
-async function settleSkippedToolCalls(
-  input: ToolExecutionBatchInput,
+export async function settleSkippedToolCalls(
+  input: ToolSettlementInput,
   calls: readonly AdmittedToolCall<ConversationToolCallItem>[],
   code: StrongCodeError["code"]
 ): Promise<Result<void>> {

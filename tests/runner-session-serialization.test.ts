@@ -1,12 +1,20 @@
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "../src/agents/agent";
 import { AgentRunner } from "../src/agents/runner";
 import type { Result } from "../src/core/result";
-import type { ModelRequest, ModelResponse } from "../src/models/provider";
+import type { ModelProvider, ModelRequest, ModelResponse } from "../src/models/provider";
 import { SessionStore } from "../src/sessions/session-store";
 import { eventsToConversationItems, messageEvent } from "../src/sessions/session";
 import { createDefaultToolRegistry } from "../src/tools/registry";
 import { tempWorkspace } from "./helpers";
+import {
+  continuationAgent,
+  continuationTool,
+  createContinuationHarness,
+  OneShotAppendFaultSessionStore,
+  scriptedProvider
+} from "./runner-continuation-fixtures";
 
 type Deferred<T> = {
   readonly promise: Promise<T>;
@@ -223,6 +231,87 @@ describe("runner session serialization", () => {
     const results = await Promise.all([first, compacting, last]);
     expect(results.every(result => result.ok)).toBe(true);
     expect(order).toEqual(["run:first", "compact", "run:last"]);
+  });
+
+  it("normalizes a missing result on the next run without persisting the synthetic result", async () => {
+    // Given
+    const harness = await createContinuationHarness(["alpha", "beta", "gamma"]);
+    const executions: string[] = [];
+    const failedRunRequests: ModelRequest[] = [];
+    const retryRequests: ModelRequest[] = [];
+    const sessions = new OneShotAppendFaultSessionStore(harness.context.dataDir, {
+      failAt: 5,
+      message: "Injected alpha result append failure"
+    });
+    harness.registry.register(continuationTool("alpha", "ALPHA_OK", executions));
+    harness.registry.register(continuationTool("beta", "must not run", executions));
+    harness.registry.register(continuationTool("gamma", "must not run", executions));
+    const failedRunModel = scriptedProvider([{
+      message: "",
+      toolCalls: [
+        { callId: "replay-alpha", name: "alpha", input: {} },
+        { callId: "replay-beta", name: "beta", input: {} },
+        { callId: "replay-gamma", name: "gamma", input: {} }
+      ]
+    }], failedRunRequests);
+    const retryModel: ModelProvider = {
+      name: "partial-persistence-retry",
+      async complete(request) {
+        retryRequests.push(request);
+        return { message: "Recovered after append failure", toolCalls: [] };
+      }
+    };
+    const runner = new AgentRunner(harness.context, sessions, harness.registry);
+
+    // When
+    const failedRun = await runner.run(
+      continuationAgent(harness.config, failedRunModel),
+      "Start",
+      "partial-persistence-replay"
+    );
+    const sessionPath = path.join(
+      harness.context.dataDir,
+      "sessions",
+      "partial-persistence-replay.jsonl"
+    );
+    const rawAfterFailure = await readFile(sessionPath, "utf8");
+    const retry = await runner.run(
+      continuationAgent(harness.config, retryModel),
+      "Try again",
+      "partial-persistence-replay"
+    );
+    const rawAfterRetry = await readFile(sessionPath, "utf8");
+    const stored = await sessions.read("partial-persistence-replay");
+
+    // Then
+    expect(failedRun).toMatchObject({
+      ok: false,
+      error: { code: "SESSION_ERROR", message: "Injected alpha result append failure" }
+    });
+    expect(retry).toMatchObject({ ok: true, value: { response: "Recovered after append failure" } });
+    expect(failedRunRequests).toHaveLength(1);
+    expect(retryRequests).toHaveLength(1);
+    expect(executions).toEqual(["alpha"]);
+    expect(sessions.appendAttempts.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["replay-alpha", "replay-beta", "replay-gamma"]);
+    const providerResults = retryRequests[0]?.items?.filter(item => item.type === "tool_result");
+    expect(providerResults?.map(item => item.callId)).toEqual(["replay-beta", "replay-gamma", "replay-alpha"]);
+    expect(providerResults?.find(item => item.callId === "replay-alpha")).toEqual({
+      type: "tool_result",
+      role: "tool",
+      callId: "replay-alpha",
+      content: "Tool execution was interrupted before a result was recorded; its outcome is unknown and StrongCode will not retry it automatically.",
+      isError: true
+    });
+    const syntheticContent = "Tool execution was interrupted before a result was recorded; its outcome is unknown and StrongCode will not retry it automatically.";
+    expect(rawAfterFailure).not.toContain(syntheticContent);
+    expect(rawAfterRetry).not.toContain(syntheticContent);
+    expect(rawAfterRetry.match(/"callId":"replay-alpha"/g)).toHaveLength(1);
+    if (!stored.ok) throw stored.error;
+    expect(stored.value.events.flatMap(event => (
+      event.type === "conversation_item" && event.item.type === "tool_result" ? [event.item.callId] : []
+    ))).toEqual(["replay-beta", "replay-gamma"]);
   });
 
   it("close drains admitted work, blocks queued side effects, and delays tool-close failure", async () => {
